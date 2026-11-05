@@ -397,7 +397,7 @@ services:
   # Suggests category rules for uncategorized withdrawals and writes them as
   # INACTIVE rules into the `Suggestions` rule group, where Firefly Pocket lets
   # you approve them. It never sets a category itself. Contract:
-  # docs/rule-suggestions.md in Pico's repository, firefly-pocket-archive.
+  # docs/rule-suggestions.md.
   #
   #   docker compose run --rm suggester suggest --dry-run
   #   docker compose run --rm suggester suggest --all     # backfill, any date

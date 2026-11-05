@@ -169,7 +169,7 @@ One `/autoimport` call imports every rendered `*.json`: the importer's `AutoImpo
 
 The **category-suggester** (`services/category-suggester`, compose service `suggester`) is the reviewed alternative to letting an LLM set categories directly. For uncategorized withdrawals it asks Claude — with web search for merchants it does not recognise — which category fits and which rule trigger would catch the merchant next time, then writes that as an **inactive** rule into the `Suggestions` rule group. Firefly Pocket lists them; approving one moves its triggers into `Category: {category}` in `Categorization`. Nothing is categorized until you approve.
 
-Both sides follow one contract, [`docs/rule-suggestions.md`](https://github.com/Majster01/firefly-pocket-archive/blob/main/docs/rule-suggestions.md) in Pico's repository: rule format, metadata, and what happens on approve / set category / reject.
+Both sides follow one contract, [`docs/rule-suggestions.md`](docs/rule-suggestions.md): rule format, metadata, and what happens on approve / set category / reject.
 
 Setup: the suggester's Personal Access Token as `SUGGESTER_FIREFLY_TOKEN` (step 5), and `ANTHROPIC_API_KEY` from an account with credit. The model reads each **category's notes** (Firefly → Categories → edit) as your definition of what belongs there, so a one-line definition per category steers it far better than the name alone.
 

@@ -1,6 +1,6 @@
 """The `pico-suggestion:v1` contract shared with Firefly Pocket.
 
-Source of truth: docs/rule-suggestions.md in Pico's repository, firefly-pocket-archive. Everything that
+Source of truth: docs/rule-suggestions.md in this repository. Everything that
 touches the wire format of a suggestion rule lives here, so the two sides can be
 checked against each other in one place.
 """
