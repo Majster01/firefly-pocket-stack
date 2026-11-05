@@ -14,6 +14,10 @@
 # One branch per service, pin/<service>. A newer pin of a service replaces the
 # one still waiting for CI, and a pin of the tag master already runs closes it:
 # the newest pin wins.
+#
+# It turns on auto-merge only while master requires status checks. Without
+# them, `gh pr merge --auto` merges at once, before CI has even started, so
+# the PR is left open for a person and the run fails.
 
 set -euo pipefail
 
@@ -54,5 +58,15 @@ if [ -n "$open" ]; then
 else
   gh pr create --base master --head "$branch" --title "$title" --body "$body" >/dev/null
 fi
+url="$(gh pr view "$branch" --json url --jq .url)"
+
+required="$(gh api "repos/{owner}/{repo}/rules/branches/master" \
+  --jq '[.[] | select(.type == "required_status_checks") | .parameters.required_status_checks[].context] | join(", ")')"
+if [ -z "$required" ]; then
+  echo "FATAL: master requires no status checks, so auto-merge would merge $url before CI ran." >&2
+  echo "       Left open: merge it by hand once its checks are green, and add them to master's" >&2
+  echo "       ruleset (README \"GitHub settings\", step 4)." >&2
+  exit 1
+fi
 gh pr merge "$branch" --auto --squash
-echo "==> $title: $(gh pr view "$branch" --json url --jq .url), merges itself once CI is green"
+echo "==> $title: $url, merges itself once $required pass"

@@ -10,8 +10,8 @@
 # Run it by hand (Actions -> Pin fork image -> Run workflow) to roll back to
 # an earlier tag; the "Bump ..." commits in master list them.
 #
-# It acts as the pin app (README "GitHub settings"): the variable PIN_APP_ID
-# and the secret PIN_APP_PRIVATE_KEY. Not GITHUB_TOKEN, because a PR or merge
+# It acts as the pin app (README "GitHub settings"): the variable
+# PIN_APP_CLIENT_ID and the secret PIN_APP_PRIVATE_KEY. Not GITHUB_TOKEN, because a PR or merge
 # made with GITHUB_TOKEN starts no workflows: CI would never run on the PR, so
 # it would never merge.
 name: Pin fork image
@@ -44,9 +44,9 @@ jobs:
     timeout-minutes: 10
     steps:
       - id: app
-        uses: actions/create-github-app-token@v2
+        uses: actions/create-github-app-token@v3
         with:
-          app-id: ${{ vars.PIN_APP_ID }}
+          client-id: ${{ vars.PIN_APP_CLIENT_ID }}
           private-key: ${{ secrets.PIN_APP_PRIVATE_KEY }}
 
       - uses: actions/checkout@v5
@@ -57,6 +57,7 @@ jobs:
       - name: Pin on pin/${{ inputs.component }} and open a PR that merges itself
         env:
           GH_TOKEN: ${{ steps.app.outputs.token }}
+          GH_REPO: ${{ github.repository }}
           APP_SLUG: ${{ steps.app.outputs.app-slug }}
           COMPONENT: ${{ inputs.component }}
           TAG: ${{ inputs.tag }}
