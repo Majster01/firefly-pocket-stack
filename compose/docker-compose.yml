@@ -286,7 +286,7 @@ services:
     # tagged <upstream version>-<commit>; a merge into its fireflyx branch pins
     # the new tag here through .github/workflows/pin.yml, which deploys it
     # (after a backup and restore test, as for every image that migrates).
-    image: ghcr.io/majster01/data-importer:2.3.5-f672e16
+    image: ghcr.io/majster01/data-importer:2.3.5-9b866ca
     container_name: fireflyx-importer
     restart: unless-stopped
     logging: *default-logging
