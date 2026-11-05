@@ -12,6 +12,12 @@ ENV_FILE="$COMPOSE_DIR/.env"
 CURL_IMAGE="curlimages/curl:8.21.0"
 DOCKER_NETWORK="fireflyx"
 
+# The services whose new image migrates a database on start, so the deploy
+# backs up and restore-tests before it starts one. The bundle's release.json
+# says the same (scripts/make-bundle.sh reads this line).
+# shellcheck disable=SC2034  # used by deploy.sh
+MIGRATING="app db importer"
+
 if [ ! -f "$ENV_FILE" ]; then
   echo "FATAL: $ENV_FILE not found. Run scripts/gen-secrets.sh first." >&2
   exit 1
@@ -189,8 +195,9 @@ package_label() {
 # package_version <image>: the release in the tag (6.6.6, 17.11, 2.3.5), or nothing
 # for a tag that is only a commit (sha-93eac8c).
 package_version() {
-  local tag="${1##*:}"
-  [ "$tag" != "$1" ] || return 0
+  local ref="${1%@sha256:*}"   # a bundle pins tag@digest; the tag is what says the version
+  local tag="${ref##*:}"
+  [ "$tag" != "$ref" ] || return 0
   tag="${tag#version-}"; tag="${tag#v}"; tag="${tag%-alpine}"
   [[ "$tag" =~ ^[0-9]+(\.[0-9]+)*$ ]] && { echo "$tag"; return 0; }
   # <release>-<commit>, as the importer fork is tagged

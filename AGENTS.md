@@ -13,9 +13,10 @@ firefly-pocket-stack is the deployment repository of a live personal-finance ser
 
 ## Checks
 
-CI (`.github/workflows/ci.yml`) runs these on every PR into `master`, as the checks `shellcheck`, `compose`, `suggester` and `boot`. Run the ones your change touches before pushing:
+CI (`.github/workflows/ci.yml`) runs these on every PR into `master`, as the checks `shellcheck`, `compose`, `suggester`, `boot` and `bundle`. Run the ones your change touches before pushing:
 
 - `git ls-files -z '*.sh' | xargs -0 shellcheck -x -P scripts` for scripts. CI runs shellcheck 0.11.0.
 - `docker compose --project-directory compose config -q` with a `compose/.env` for compose changes (the `:?` variables must be set; dummy values are fine locally, or `cp compose/.env.example compose/.env && scripts/gen-secrets.sh` as CI does).
 - `python -m unittest` in `services/category-suggester` for the suggester, with `requirements.txt` installed. CI runs them inside the suggester's image.
+- `scripts/make-bundle.sh <empty-dir>` assembles the release bundle that `.github/workflows/publish.yml` pushes on every merge: it reads every image's digest from its registry, so it needs network access to them.
 - `scripts/boot-test.sh` boots the whole stack with throwaway values and runs the deploy's smoke test (`KEEP=1` leaves it running). It needs Docker, refuses to run where `compose/.env` exists, and is never for the server: its containers use the server's names.

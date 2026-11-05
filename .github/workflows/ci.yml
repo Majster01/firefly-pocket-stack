@@ -2,8 +2,9 @@
 # deploys, so these are what a change has to pass first. Run the same commands
 # locally before pushing (AGENTS.md "Checks").
 #
-# One check per job. Their names (shellcheck, compose, suggester, boot) are
-# what master's ruleset requires, so rename them only together with it.
+# One check per job. Their names (shellcheck, compose, suggester, boot,
+# bundle) are what master's ruleset requires, so rename them only together
+# with it.
 name: CI
 
 on:
@@ -81,3 +82,19 @@ jobs:
 
       - name: Boot the stack and run the deploy's smoke test
         run: scripts/boot-test.sh
+
+  # The release bundle this PR would publish once merged (publish.yml), made
+  # but not pushed: every image resolves to a digest, and compose accepts the
+  # pinned file.
+  bundle:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0   # the version counts the commits since the last release tag
+
+      - name: Assemble the bundle
+        run: |
+          scripts/make-bundle.sh "$RUNNER_TEMP/bundle"
+          cat "$RUNNER_TEMP/bundle/release.json"

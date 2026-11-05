@@ -1,0 +1,84 @@
+# Publish the release bundle (Release pipeline step 5). On every merge into
+# master: the files a server runs, every image pinned by digest, and a
+# release.json (scripts/make-bundle.sh), as ghcr.io/majster01/firefly-pocket-stack:
+#
+#   sha-<commit>   that commit's bundle, never moved
+#   latest         the newest commit on master
+#
+# The release workflow (Release pipeline step 6) adds the release tags, stable
+# and X.Y.Z, to one of these; it never rebuilds. The bundle is an image FROM
+# scratch holding only those files, and nothing runs it. To look inside one:
+#
+#   docker create --name bundle ghcr.io/majster01/firefly-pocket-stack:latest none
+#   docker cp bundle:/ ./bundle && docker rm bundle
+name: Publish bundle
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:   # publish master again, e.g. after a failed run
+
+# In order, so every commit gets its sha- tag and latest only moves forward.
+concurrency:
+  group: publish
+  cancel-in-progress: false
+
+permissions: {}
+
+jobs:
+  bundle:
+    if: github.ref == 'refs/heads/master'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: write
+    env:
+      IMAGE: ghcr.io/majster01/firefly-pocket-stack
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0   # the version counts the commits since the last release tag
+
+      - id: bundle
+        name: Assemble the bundle
+        run: |
+          scripts/make-bundle.sh "$RUNNER_TEMP/bundle"
+          cat "$RUNNER_TEMP/bundle/release.json"
+          echo "version=$(jq -r .version "$RUNNER_TEMP/bundle/release.json")" >> "$GITHUB_OUTPUT"
+          echo "tag=sha-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Push ${{ steps.bundle.outputs.tag }}
+        env:
+          TAG: ${{ steps.bundle.outputs.tag }}
+          VERSION: ${{ steps.bundle.outputs.version }}
+        run: |
+          printf 'FROM scratch\nCOPY . /\n' > "$RUNNER_TEMP/Dockerfile"
+          docker build -f "$RUNNER_TEMP/Dockerfile" \
+            --label org.opencontainers.image.source="https://github.com/$GITHUB_REPOSITORY" \
+            --label org.opencontainers.image.revision="$GITHUB_SHA" \
+            --label org.opencontainers.image.version="$VERSION" \
+            --label org.opencontainers.image.title="firefly-pocket-stack" \
+            --label org.opencontainers.image.description="Release bundle of firefly-pocket-stack: the files a server runs, every image pinned by digest" \
+            -t "$IMAGE:$TAG" "$RUNNER_TEMP/bundle"
+          docker push "$IMAGE:$TAG"
+
+      # Only the newest commit on master moves latest: a run that finishes after
+      # a later merge leaves it to that merge's own run.
+      - name: Move latest
+        env:
+          TAG: ${{ steps.bundle.outputs.tag }}
+        run: |
+          head="$(git ls-remote origin refs/heads/master | cut -f1)"
+          if [ "$head" != "$GITHUB_SHA" ]; then
+            echo "master is at ${head::7} now; its own run moves latest."
+            exit 0
+          fi
+          docker buildx imagetools create -t "$IMAGE:latest" "$IMAGE:$TAG"
+          docker buildx imagetools inspect "$IMAGE:latest"
