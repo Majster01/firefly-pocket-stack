@@ -42,7 +42,6 @@ class Settings:
     max_per_run: int
     db_path: str
     ntfy_url: str
-    pico_url: str
     # Firefly Pocket's internal Web Push endpoint and its bearer token. Push is on only
     # when both are set. The digest goes only there (ntfy_url is no longer used by
     # `notify`: ntfy is for failures).
@@ -63,9 +62,6 @@ class Settings:
             # Local runs: Caddy adds no auth to the Firefly vhost, so the public
             # URL works from a laptop exactly as the internal one does in compose.
             firefly_url = f"https://{get('FIREFLY_HOSTNAME')}"
-        pico_url = get("PICO_URL")
-        if not pico_url and get("PICO_HOSTNAME"):
-            pico_url = f"https://{get('PICO_HOSTNAME')}"
 
         model = get("SUGGESTER_MODEL", DEFAULT_MODEL)
         # Only the key of the provider the model belongs to is required.
@@ -91,7 +87,6 @@ class Settings:
             max_per_run=max_per_run,
             db_path=get("SUGGESTER_DB", DEFAULT_DB_PATH),
             ntfy_url=get("NTFY_URL"),
-            pico_url=pico_url.rstrip("/"),
             next_notify_url=get("NEXT_NOTIFY_URL"),
             next_notify_token=get("NEXT_NOTIFY_TOKEN"),
         )

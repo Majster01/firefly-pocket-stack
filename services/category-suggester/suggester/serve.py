@@ -1,13 +1,14 @@
 """Run `suggest` on request, for the importer's "import now".
 
-A manual import (started from Pico) is followed by suggestions for the time
+A manual import (started from Firefly Pocket) is followed by suggestions for the time
 frame it imported. The importer cannot start a container, so this small server
 does it: POST /suggest {"since": "YYYY-MM-DD", "until": "YYYY-MM-DD"} with the
 shared token, answered when the run is over.
 
 GET /stats?days=30 (same token) answers with the run history and what became of
 the suggestions, read from the same SQLite file; the importer passes it on to
-the status page in Pico, so Pico needs no token of its own for this service.
+the status page in Firefly Pocket, so it needs no token of its own for this
+service.
 
 It listens on the compose network only (no published port, no Caddy route) and
 refuses to start without a token, so nothing outside the stack can drive the

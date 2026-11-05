@@ -78,7 +78,7 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
         "--source",
         choices=SOURCES,
         default="nightly",
-        help="who asked, for the run history shown in Pico (the importer's `serve` passes manual)",
+        help="who asked, for the run history shown in Firefly Pocket (the importer's `serve` passes manual)",
     )
 
     serve = sub.add_parser("serve", help="run suggest on request from the importer (internal network only)")
@@ -162,7 +162,8 @@ def pending_trigger_keys(rules: list[dict]) -> set[tuple[str, str, str]]:
     """Triggers already waiting in `Suggestions`.
 
     A new transaction from a merchant whose suggestion is still unreviewed needs
-    no second suggestion: Pico's approve backfills every uncategorized match.
+    no second suggestion: approving it in Firefly Pocket backfills every
+    uncategorized match.
     """
     keys = set()
     for rule in rules:

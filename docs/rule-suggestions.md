@@ -1,10 +1,10 @@
-# Rule suggestions contract (`pico-suggestion:v1`)
+# Rule suggestions contract (`firefly-pocket-suggestion:v1`)
 
 The shared contract between the **category-suggester** (`services/category-suggester` in this repository, writes suggestions) and **Firefly Pocket** (reads, edits, approves, rejects them). Neither side depends on the other's code — only on this file and on Firefly III's rules API.
 
 Firefly III is the source of truth. Both components are API clients with their own Personal Access Token.
 
-This file used to live in Pico's repository, now archived as `Majster01/firefly-pocket-archive`. The marker keeps Pico's name until Retire Pico step 4 renames it.
+This file used to live in Pico's repository, now archived as `Majster01/firefly-pocket-archive`, and the marker was `pico-suggestion:v1` until Retire Pico step 4. Nothing reads the old marker any more: every suggestion that carried it was approved or rejected before the rename.
 
 ## Rule groups
 
@@ -15,7 +15,7 @@ Groups are looked up **by title**, never by id.
 | `Categorization` | `RULE_GROUP_CATEGORIZATION` | Live rules: the guard `Stop: already categorized` at order 1, then one `Category: {category}` rule per category | yes |
 | `Suggestions` | `RULE_GROUP_SUGGESTIONS` | Pending suggestions only, written by the suggester | no (backstop) |
 
-Only the suggester writes to `Suggestions`. Rules there without the `pico-suggestion:v1` marker are not supported and Firefly Pocket hides them.
+Only the suggester writes to `Suggestions`. Rules there without the `firefly-pocket-suggestion:v1` marker are not supported and Firefly Pocket hides them.
 
 ## Suggestion rule
 
@@ -29,11 +29,11 @@ Only the suggester writes to `Suggestions`. Rules there without the `pico-sugges
 | `stop_processing` | `true` |
 | `triggers[]` | one or more of `description_contains`, `destination_account_contains`, `destination_account_is`, `destination_account_id`; each `active: true`, `stop_processing: true` |
 | `actions[]` | exactly one: `set_category={category}`, `active: true`. Firefly requires a value, so a low-confidence suggestion carries the model's best guess |
-| `description` | `pico-suggestion:v1 ` followed by the metadata JSON on the same line |
+| `description` | `firefly-pocket-suggestion:v1 ` followed by the metadata JSON on the same line |
 
 The trigger/strict/stop_processing settings match the `Category:` rules, so triggers can be copied across unchanged.
 
-**Reading `description`:** Firefly 6.6.6 returns rule descriptions HTML-escaped (`&quot;`, `&amp;`, `&#039;`), while titles, triggers and actions come back as written. Readers must HTML-unescape the description (PHP `html_entity_decode($d, ENT_QUOTES)`, Python `html.unescape`) before stripping the `pico-suggestion:v1 ` prefix and parsing the JSON. Writers send plain JSON.
+**Reading `description`:** Firefly 6.6.6 returns rule descriptions HTML-escaped (`&quot;`, `&amp;`, `&#039;`), while titles, triggers and actions come back as written. Readers must HTML-unescape the description (PHP `html_entity_decode($d, ENT_QUOTES)`, Python `html.unescape`) before stripping the `firefly-pocket-suggestion:v1 ` prefix and parsing the JSON. Writers send plain JSON.
 
 ### Metadata JSON
 

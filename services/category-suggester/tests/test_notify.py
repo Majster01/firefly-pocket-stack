@@ -28,7 +28,6 @@ def settings(**changes):
         max_per_run=50,
         db_path="/unused",
         ntfy_url="",
-        pico_url="https://pico.example",
         next_notify_url="",
         next_notify_token="",
     )

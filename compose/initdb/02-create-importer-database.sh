@@ -1,7 +1,7 @@
 #!/bin/bash
 # The Data Importer fork's own database: bank connections, their accounts and
 # import results (docs/design/bank-link.md). Owned by its own role, like the
-# others, so neither Firefly III nor Pico can read the bank sessions.
+# others, so neither Firefly III nor Firefly Pocket can read the bank sessions.
 #
 # Idempotent on purpose. Postgres runs this automatically only on a brand-new
 # db_data volume; on an existing server, scripts/setup-importer-db.sh runs this

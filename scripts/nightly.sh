@@ -40,8 +40,8 @@ run_step "bank consent check" \
 # --- 2. Render the import configs -----------------------------------------
 # Writes the shared base config + each usable connection + one date window
 # (today minus IMPORT_LOOKBACK_DAYS) into /import, and removes the files of
-# connections that are gone, expired or unmapped. A connection saved in Pico
-# during the day is therefore imported tonight, with no deploy or restart.
+# connections that are gone, expired or unmapped. A connection saved in
+# Firefly Pocket during the day is therefore imported tonight, with no deploy or restart.
 # If the base config is invalid, nothing is written: yesterday's files stay.
 run_step "render import configs" \
   importer_artisan fireflyx:render \
@@ -121,7 +121,7 @@ esac
 # --- 5. Category suggestions ----------------------------------------------
 # The Categorization rules already ran on every imported transaction. For what
 # is still uncategorized, the suggester writes INACTIVE rules into the
-# `Suggestions` group for review in Pico. It never sets a category itself.
+# `Suggestions` group for review in Firefly Pocket. It never sets a category itself.
 # It exits non-zero only when Firefly or the model API is unreachable.
 run_step "category suggestions" \
   docker compose --project-directory "$COMPOSE_DIR" \

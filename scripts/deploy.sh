@@ -21,7 +21,7 @@
 #   4. docker compose up -d --remove-orphans: compose restarts only what changed
 #      (and Caddy, when the Caddyfile changed)
 #   5. install the crontab
-#   6. check that Firefly III, the importer, Pico and Firefly Pocket answer and every
+#   6. check that Firefly III, the importer and Firefly Pocket answer and every
 #      service runs
 #
 # A failure goes to ntfy and the Firefly Pocket app. A success that upgraded a package
@@ -150,12 +150,12 @@ caddyfile_changed() {
 }
 
 # The apps answer on the internal network (Firefly III may still be migrating,
-# so each gets five minutes), and every service compose starts runs. Pocket
-# Next's /api/test is a plain Laravel route: nginx, php-fpm and the app, no
+# so each gets five minutes), and every service compose starts runs. Firefly
+# Pocket's /api/test is a plain Laravel route: nginx, php-fpm and the app, no
 # Firefly call and no login.
 smoke_test() {
   local url svc down="" _
-  for url in http://app:8080/health http://importer:8080/health http://pico:80/ \
+  for url in http://app:8080/health http://importer:8080/health \
              http://next:80/ http://next:80/api/test; do
     for _ in $(seq 30); do
       internal_http "$url" 10 >/dev/null 2>&1 && continue 2
@@ -171,7 +171,7 @@ smoke_test() {
     echo "not running:$down"
     return 1
   fi
-  echo "Firefly III, the importer, Pico and Firefly Pocket answer; every service runs"
+  echo "Firefly III, the importer and Firefly Pocket answer; every service runs"
 }
 
 echo "==> deploy $(git log --oneline -1) (last deployed: ${old:0:7})"

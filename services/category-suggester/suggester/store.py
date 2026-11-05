@@ -199,7 +199,7 @@ class Store:
         return {row[0] for row in self.conn.execute("SELECT journal_id FROM rejected_journals")}
 
     def stats(self, days: int = 30, recent: int = 20) -> dict:
-        """Run history and suggestion outcomes, for the status page in Pico.
+        """Run history and suggestion outcomes, for the status page in Firefly Pocket.
 
         `suggestions` counts every suggestion this suggester ever wrote by where
         it ended up (all time); `totals` add up the runs of the last `days`.

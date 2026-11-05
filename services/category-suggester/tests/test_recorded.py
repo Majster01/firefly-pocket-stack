@@ -22,7 +22,6 @@ def settings(db_path):
         max_per_run=50,
         db_path=db_path,
         ntfy_url="",
-        pico_url="",
     )
 
 

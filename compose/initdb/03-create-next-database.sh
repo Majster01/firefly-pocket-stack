@@ -1,7 +1,7 @@
 #!/bin/bash
-# Firefly Pocket's own database (the redesign of Pico, compose service `next`):
-# its templates, profiles and push subscriptions. Owned by its own role, like
-# the others, so it cannot read Pico's data, nor Pico its.
+# Firefly Pocket's own database (compose service `next`): its templates,
+# profiles and push subscriptions. Owned by its own role, like the others, so
+# no other app can read it.
 #
 # Idempotent on purpose. Postgres runs this automatically only on a brand-new
 # db_data volume; on an existing server, scripts/setup-next-db.sh runs this
