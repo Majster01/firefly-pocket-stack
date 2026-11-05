@@ -4,8 +4,9 @@
 #
 #   1. image   ghcr.io/majster01/firefly-pocket-suggester:sha-<commit>, pushed
 #              only after its tests pass inside it
-#   2. deploy  "Pin fork image" sets that tag in compose and commits to master,
-#              as it does for the forks; the server deploys master.
+#   2. deploy  "Pin fork image" sets that tag in compose on a pin PR that merges
+#              itself once CI is green, as for the forks; the server deploys
+#              master.
 #
 # Runs on a merge into master that changes the suggester. Run it by hand
 # (Actions -> Suggester image -> Run workflow) to rebuild master's suggester,

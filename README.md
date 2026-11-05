@@ -397,15 +397,15 @@ To find duplicates already imported, group transactions by `external_id`; any gr
 **Merging into `master` is deploying.** The server runs what `master` says and nothing else, so work on a branch and merge when you want it live. The two forks work the same way: their deploy branch is production too (their `DEPLOYING.md`).
 
 ```
-fork merge ─► fork CI builds and pushes the image ─► "Pin fork image" commits its tag ─┐
-suggester change merged ─► "Suggester image" builds and pushes it ─► the same pin ─────┤
-Renovate PR (Firefly III, Postgres, Caddy, …) ─► CI ─► you merge ──────────────────────┼─► master
-your change ─► PR ─► CI ─► you merge ──────────────────────────────────────────────────┘     │
-                                                                                            ▼
-                                          server, every 2 minutes: git fetch ─► scripts/deploy.sh
+fork merge ─► its CI builds the image ──────────┐
+suggester change ─► "Suggester image" builds it ┴─► pin PR ─► CI ─► merges itself ─┐
+Renovate PR (Firefly III, Postgres, Caddy, …) ─► CI ─► you merge ──────────────────┼─► master
+your change ─► PR ─► CI ─► you merge ──────────────────────────────────────────────┘     │
+                                                                                         ▼
+                                       server, every 2 minutes: git fetch ─► scripts/deploy.sh
 ```
 
-Every PR into `master` runs CI (`.github/workflows/ci.yml`), three checks: `shellcheck` on every script, `compose` (`docker compose config` with a `.env` made the way a new server makes one, by `scripts/gen-secrets.sh`), and `suggester` (its tests, inside the image the server runs). Merge only when all three are green. Pins go straight to `master` without them: the CI that built the image has checked that change.
+Every PR into `master` runs CI (`.github/workflows/ci.yml`), three checks: `shellcheck` on every script, `compose` (`docker compose config` with a `.env` made the way a new server makes one, by `scripts/gen-secrets.sh`), and `suggester` (its tests, inside the image the server runs). Merge only when all three are green. Pins are PRs too: *Pin fork image* opens one per service as the pin app (the *pin PR* above), and it merges itself once the three checks pass. `master` takes no direct pushes at all ([GitHub settings](#github-settings-once)).
 
 The server pulls; nothing logs into it to deploy. `/opt/fireflyx` is a git checkout of `master`, fetched over HTTPS without credentials. Every two minutes `fireflyx-deploy.timer` runs `scripts/deploy.sh`, and when `master` has moved, that resets the checkout to it and:
 
@@ -424,7 +424,7 @@ The deploy and the cron jobs share one lock, `/run/lock/fireflyx.lock`: a deploy
 | Firefly Pocket | merge into `main` of [firefly-pocket](https://github.com/Majster01/firefly-pocket) | `next` |
 | The importer fork | merge into `fireflyx` of [data-importer](https://github.com/Majster01/data-importer) | `importer`, after a backup and restore test |
 | Firefly III, Postgres, Caddy, Dozzle, the socket proxy, the images the scripts use | Renovate opens a PR on Monday mornings; merge it | that service; Firefly III and Postgres after a backup and restore test |
-| The category suggester (`services/category-suggester`) | merge into `master`; *Suggester image* builds and tests the image, then "Pin fork image" commits its tag | `suggester-trigger`; the nightly run uses it the same night |
+| The category suggester (`services/category-suggester`) | merge into `master`; *Suggester image* builds and tests the image, then "Pin fork image" opens its pin PR | `suggester-trigger`; the nightly run uses it the same night |
 | Anything else in this repository: compose, Caddyfile, scripts, `crontab`, `config/importer-base.json` | merge into `master` | whatever compose sees changed |
 | `compose/.env` (only on the server) | edit it there, then `scripts/deploy.sh --force` | the services whose environment changed |
 
@@ -433,7 +433,7 @@ Rules:
 - **Never edit tracked files on the server.** The deploy refuses to run over them and alerts. Put the change into `master`.
 - **A new secret or `.env` value goes onto the server before the merge** (`./scripts/gen-secrets.sh`, or by hand). Without it the deploy stops at `docker compose` with the `:?` message, and nothing restarts.
 - **Features across repositories**: merge the side the others call first, usually this repository, then the importer, then Firefly Pocket. Each tolerates the others being older.
-- **Roll back a fork**: Actions → *Pin fork image* → *Run workflow* with the service and an earlier tag (the `Bump …` commits in `master` list them). Anything else: revert the commit in `master`. Rolling back an image that has migrated a database also needs that database restored ([Restoring](#restoring)).
+- **Roll back a fork or the suggester**: Actions → *Pin fork image* → *Run workflow* with the service and an earlier tag (the `Bump …` commits in `master` list them). It opens a pin PR that merges itself, like any other. Anything else: *Revert* on the merged PR in GitHub, which opens a PR that undoes it. Rolling back an image that has migrated a database also needs that database restored ([Restoring](#restoring)).
 - **What runs now**: `cat /opt/fireflyx/.deployed-rev`; the log is `journalctl -u fireflyx-deploy`.
 
 Optional: with `DEPLOY_STATUS_TOKEN` in `.env` (a fine-grained token for this repository only, *Commit statuses: Read and write*), every commit in GitHub shows a `deploy/server` status: pending, success or failure.
@@ -455,6 +455,18 @@ The old laptop deploys (`deploy-pico.sh`, `deploy-firefly.sh`, `deploy-cron.sh`,
 5. **Renovate.** Install the [Renovate app](https://github.com/apps/renovate) on this repository only. `renovate.json` is already here, so there is no onboarding PR; the *Dependency Dashboard* issue lists what it tracks and what is waiting.
 
 `scripts/logs.sh` (Dozzle over SSH) still runs from the laptop as before.
+
+#### GitHub settings (once)
+
+`master` takes no direct pushes: every change, a pin included, is a PR that passes CI. A pin's PR is opened by a GitHub App of your own, because a PR opened with a workflow's built-in token starts no workflows, so CI would never run on it. Set this up once, in this order:
+
+1. **The pin app.** Your profile → *Settings* → *Developer settings* → *GitHub Apps* → *New GitHub App*. Any name GitHub accepts (it must be unique, e.g. `firefly-pocket-pin-<you>`), any homepage URL, *Webhook* → *Active* off. *Repository permissions*: *Contents* and *Pull requests*, both *Read and write*, nothing else. *Only on this account*. Create it and note its **App ID**; under *Private keys*, *Generate a private key* (a `.pem` file downloads). Then *Install App* → your account → *Only select repositories* → firefly-pocket-stack.
+2. **Hand it to the workflow.** This repository → *Settings* → *Secrets and variables* → *Actions*: the **variable** `PIN_APP_ID` (the App ID) and the **secret** `PIN_APP_PRIVATE_KEY` (the whole `.pem` file). Delete the `.pem` afterwards; the app page makes a new key whenever you need one.
+3. **Pull requests.** *Settings* → *General* → *Pull Requests*: *Allow squash merging* and *Allow auto-merge* on, and *Automatically delete head branches* on.
+4. **Protect `master`.** *Settings* → *Rules* → *Rulesets* → *New branch ruleset*: name `master`, *Enforcement status* Active, *Target branches* → *Include default branch*, and nothing in *Bypass list*. Rules: *Restrict deletions*, *Block force pushes*, *Require a pull request before merging* (0 approvals), and *Require status checks to pass* with `shellcheck`, `compose` and `suggester`. Leave *Require branches to be up to date before merging* off, so two pins waiting at once both merge.
+5. **Security.** *Settings* → *Advanced Security*: *Private vulnerability reporting*, *Secret scanning* and *Push protection* on. `SECURITY.md` points reporters at the first.
+
+From then on a pin arrives as a PR from the app, *Bump Next to abc1234*, that merges itself when the three checks pass, usually within a minute, and the merge deploys. A pin PR left open has a failed check; its CI run says which. Each service has one branch, `pin/<service>`: a newer pin replaces a waiting one, and a pin of the tag `master` already runs closes it.
 
 ### Updating Firefly III
 
@@ -517,7 +529,7 @@ Rotating `NEXT_NOTIFY_TOKEN` also needs `docker compose up -d next`; the host sc
 | No category suggestions appear | It only looks at **uncategorized withdrawals** from the last 30 days; check `/var/log/fireflyx-nightly.log`, that `SUGGESTER_FIREFLY_TOKEN` and `ANTHROPIC_API_KEY` are set, and that the Anthropic account has credit |
 | `initdb` changes have no effect | It runs only against an empty `db_data` volume — apply by hand with psql |
 | Deploy alert "Tracked files were edited on the server" | Someone changed a file git tracks in `/opt/fireflyx`. Put the change into `master`, or `git checkout -- <file>` on the server, then `scripts/deploy.sh --force` |
-| A merge in a fork never shows up on the server | Find where it stopped: the fork's *Deploy* run (build, or an expired `FIREFLY_POCKET_DISPATCH_TOKEN`), then this repository's *Pin fork image* run ("cannot be pulled without a login": the GHCR package is private), then `journalctl -u fireflyx-deploy` on the server |
+| A merge in a fork never shows up on the server | Find where it stopped: the fork's *Deploy* run (build, or an expired `FIREFLY_POCKET_DISPATCH_TOKEN`), then this repository's *Pin fork image* run ("cannot be pulled without a login": the GHCR package is private; a failure at the app token: `PIN_APP_ID` or `PIN_APP_PRIVATE_KEY`), then the pin PR's checks (a red one stops the merge), then `journalctl -u fireflyx-deploy` on the server |
 
 ---
 
