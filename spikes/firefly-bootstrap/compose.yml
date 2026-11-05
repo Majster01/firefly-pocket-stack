@@ -1,0 +1,37 @@
+# Throwaway Firefly III for the bootstrap spike. Invented values only; never a real server.
+name: ffspike
+services:
+  db:
+    image: postgres:17.11-alpine
+    environment:
+      POSTGRES_USER: firefly
+      POSTGRES_PASSWORD: spikepass
+      POSTGRES_DB: firefly
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U firefly -d firefly"]
+      interval: 3s
+      retries: 30
+  app:
+    image: fireflyiii/core:version-6.7.9
+    ports: ["8080:8080"]
+    environment:
+      APP_ENV: production
+      APP_DEBUG: "false"
+      APP_KEY: SomeRandomStringOf32CharsExactly
+      APP_URL: http://localhost:8080
+      TRUSTED_PROXIES: "**"
+      DB_CONNECTION: pgsql
+      DB_HOST: db
+      DB_PORT: "5432"
+      DB_DATABASE: firefly
+      DB_USERNAME: firefly
+      DB_PASSWORD: spikepass
+      SITE_OWNER: owner@example.com
+      STATIC_CRON_TOKEN: AnotherRandomStringOf32CharsXXXX
+      SESSION_DRIVER: file
+      CACHE_DRIVER: file
+      # Only needed on a host without IPv6 (the image listens on [::] too).
+      NGINX_LISTEN_IP_PROTOCOL: ipv4
+    depends_on:
+      db:
+        condition: service_healthy

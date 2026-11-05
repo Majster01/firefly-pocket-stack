@@ -1,0 +1,143 @@
+# Caddy obtains and renews Let's Encrypt certificates automatically.
+# DNS for every name below must already point at this server before first
+# start, otherwise the ACME challenge fails and no certificate is issued.
+#
+# Values come from the environment (set in .env, passed through by compose).
+{
+	email {$ACME_EMAIL}
+
+	# Defaults to Let's Encrypt production. Override ACME_CA in .env to point
+	# at staging while testing:
+	#   ACME_CA=https://acme-staging-v02.api.letsencrypt.org/directory
+	#
+	# Worth doing on a first deploy or after any DNS/firewall change. Staging
+	# issues untrusted certs but has far higher rate limits, so a
+	# misconfiguration costs nothing. Production allows only 5 failures per
+	# hostname per hour, and burning that leaves you waiting.
+	# Clear the variable and recreate Caddy to switch back.
+	acme_ca {$ACME_CA:https://acme-v02.api.letsencrypt.org/directory}
+}
+
+(security_headers) {
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "SAMEORIGIN"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		-Server
+	}
+}
+
+# Firefly III — has its own login. Registration closes by itself once the first
+# account exists (single_user_mode; there is no flag, see docker-compose.yml).
+{$FIREFLY_HOSTNAME} {
+	import security_headers
+	reverse_proxy app:8080
+}
+
+# Firefly Pico — NO login of its own: it is unlocked by the Firefly III Personal
+# Access Token stored in the browser, and every API call it makes checks that
+# token with Firefly III. Note port 80, not 8080.
+#
+# /api/internal/* (the Web Push endpoint this stack's alert senders call) is for
+# the internal network only; it answers here too, so refuse it outright (it is
+# also token-guarded).
+{$PICO_HOSTNAME} {
+	import security_headers
+
+	@pico_internal path /api/internal /api/internal/*
+
+	route {
+		handle @pico_internal {
+			respond 404
+		}
+		handle {
+			reverse_proxy pico:80
+		}
+	}
+}
+
+# Firefly Pocket — the redesign of Pico, the same way in: no login of its own,
+# unlocked by a Firefly III Personal Access Token in the browser. Port 80 too.
+# Its /api/internal/* (Web Push receiver, Firefly webhook) is for the internal
+# network only, so it is refused here as on Pico's site.
+{$NEXT_HOSTNAME} {
+	import security_headers
+
+	@next_internal path /api/internal /api/internal/*
+
+	route {
+		handle @next_internal {
+			respond 404
+		}
+		handle {
+			reverse_proxy next:80
+		}
+	}
+}
+
+# Data Importer — must be publicly reachable so the Enable Banking OAuth
+# redirect can land in your browser over HTTPS. It has no authentication of
+# its own, so basic auth covers the whole host. The exceptions: the fork's
+# consent callbacks (state-protected, see below) and its internal API, which
+# is refused here entirely.
+#
+# The nightly /autoimport trigger deliberately does NOT come through here;
+# cron calls the container directly on the internal Docker network, so this
+# stays fully locked down without breaking automation.
+{$IMPORT_HOSTNAME} {
+	import security_headers
+
+	# Consent callbacks of re-links started from Pico. Enable Banking only
+	# redirects to the registered /eb-callback, so both flows arrive there; the
+	# fork's state is "fx-" + hex, upstream's is a UUID. Ours skip basic auth —
+	# the phone coming back from the bank has no credentials — and are
+	# protected by the single-use state instead.
+	@fireflyx_callback {
+		path /eb-callback
+		vars_regexp {http.request.uri.query.state} ^fx-[0-9a-f]+$
+	}
+	# The importer fork's API is for Pico on the internal network only; it
+	# answers here too, so refuse it outright (it is also token-guarded).
+	@fireflyx_internal path /api/fireflyx/* /fireflyx/*
+
+	route {
+		handle @fireflyx_callback {
+			rewrite * /fireflyx/eb-callback{?query}
+			reverse_proxy importer:8080
+		}
+		handle @fireflyx_internal {
+			respond 404
+		}
+		handle {
+			basic_auth {
+				{$IMPORT_AUTH_USER} {$IMPORT_AUTH_HASH}
+			}
+			reverse_proxy importer:8080
+		}
+	}
+}
+
+# Privacy policy and terms. Deliberately PUBLIC with no basic auth: Enable
+# Banking requires these URLs on a production application and a reviewer must
+# be able to read them. Nothing here is sensitive — it is static text only,
+# served from a read-only mount, with no application behind it.
+#
+# try_files gives clean URLs, so /privacy serves privacy.html.
+#
+# The pages are templates: the operator's name, contact address and site name
+# come from LEGAL_OWNER_NAME, LEGAL_CONTACT_EMAIL and LEGAL_SITE_NAME in .env
+# (compose passes them to Caddy), so nothing personal is committed.
+{$LEGAL_HOSTNAME} {
+	import security_headers
+	root * /srv/legal
+	try_files {path} {path}.html {path}/index.html
+	templates
+	file_server
+}
+
+# Intentionally absent:
+#   - the category suggester: a nightly job with no port;
+#   - Dozzle, the log viewer: through the Docker socket proxy it can read every
+#     container's environment and files, so it is reachable only over an SSH
+#     tunnel to the host's loopback (see docker-compose.yml), never from here.

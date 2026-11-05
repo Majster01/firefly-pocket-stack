@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Terms of Service — {{or (env "LEGAL_SITE_NAME") .Host}}</title>
+<style>
+  :root { color-scheme: light dark; }
+  body {
+    font: 16px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    max-width: 46rem; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; color: #1a1a1a; background: #fff;
+  }
+  @media (prefers-color-scheme: dark) { body { color: #e6e6e6; background: #121212; } a { color: #7fb3ff; } }
+  h1 { font-size: 1.75rem; margin-bottom: .25rem; }
+  h2 { font-size: 1.15rem; margin-top: 2rem; }
+  .meta { color: #666; font-size: .9rem; margin-top: 0; }
+  @media (prefers-color-scheme: dark) { .meta { color: #999; } }
+  footer { margin-top: 3rem; font-size: .9rem; color: #666; }
+</style>
+</head>
+<body>
+
+<h1>Terms of Service</h1>
+<p class="meta">Last updated: 31 August 2026</p>
+
+<h2>1. Nature of this service</h2>
+<p>
+  This is a private, self-hosted installation of
+  <a href="https://www.firefly-iii.org/">Firefly III</a> operated by one
+  individual for their own personal household finances. It is not a commercial
+  service, not a product, and not offered to the public.
+</p>
+
+<h2>2. Who may use it</h2>
+<p>
+  The operator only. Registration is closed and no accounts are available to
+  anyone else. There are no customers, subscribers, or third-party users, and
+  no mechanism exists to become one.
+</p>
+
+<h2>3. Operator</h2>
+<p>
+  {{or (env "LEGAL_OWNER_NAME") "The operator of this server"}} — an individual acting in a personal capacity.<br>
+  Contact: <a href="mailto:{{env "LEGAL_CONTACT_EMAIL"}}">{{env "LEGAL_CONTACT_EMAIL"}}</a>
+</p>
+
+<h2>4. Bank account access</h2>
+<p>
+  Access to bank account information is obtained through Enable Banking Oy, a
+  licensed account information service provider, and only for accounts the
+  operator personally owns. Access requires the operator's explicit consent,
+  granted directly to their own bank, and that consent expires periodically
+  under PSD2 rules. It may be withdrawn at any time.
+</p>
+<p>
+  This service performs no payment initiation. It reads account and transaction
+  information only; it cannot move money.
+</p>
+
+<h2>5. No warranty</h2>
+<p>
+  This service is provided as-is, for personal use, with no warranty of any
+  kind. It may be unavailable, interrupted, or discontinued at any time without
+  notice. Financial data shown here is informational and is not a substitute
+  for official statements from the relevant bank.
+</p>
+
+<h2>6. Third-party software</h2>
+<p>
+  This installation runs open-source software, including Firefly III and its
+  data importer, under their respective licences. The operator is not
+  affiliated with those projects, nor with Enable Banking or any bank.
+</p>
+
+<h2>7. Changes</h2>
+<p>
+  These terms may be updated if the setup changes. The date at the top reflects
+  the current version.
+</p>
+
+<h2>8. Governing law</h2>
+<p>
+  These terms are governed by the laws of the Republic of Slovenia.
+</p>
+
+<footer>
+  <a href="/">Home</a> · <a href="/privacy">Privacy Policy</a>
+</footer>
+
+</body>
+</html>

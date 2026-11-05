@@ -1,0 +1,118 @@
+#cloud-config
+#
+# First-boot configuration for the FireflyX host.
+#
+# NOTE: this file is rendered by Terraform's templatefile(). A literal shell
+# variable must therefore be written with a doubled dollar sign -- see the
+# VERSION_CODENAME reference in runcmd below for the real example. A single
+# dollar sign followed by braces is interpolated by Terraform at plan time,
+# and fails the build if the name inside is not a declared variable.
+
+timezone: ${timezone}
+
+package_update: true
+package_upgrade: true
+
+packages:
+  - ca-certificates
+  - curl
+  - git
+  - jq
+  - restic
+  - fail2ban
+  - unattended-upgrades
+  - apt-listchanges
+
+users:
+  - name: ${admin_user}
+    groups: [sudo, docker]
+    shell: /bin/bash
+    sudo: "ALL=(ALL) NOPASSWD:ALL"
+    ssh_authorized_keys:
+      - ${ssh_public_key}
+
+write_files:
+  # Key-only SSH. The Hetzner firewall already restricts who can reach port
+  # 22; this makes sure that even from an allowed address there is no password
+  # to guess.
+  - path: /etc/ssh/sshd_config.d/99-fireflyx.conf
+    permissions: "0644"
+    content: |
+      PermitRootLogin no
+      PasswordAuthentication no
+      KbdInteractiveAuthentication no
+      ChallengeResponseAuthentication no
+      X11Forwarding no
+
+  - path: /etc/fail2ban/jail.d/sshd.local
+    permissions: "0644"
+    content: |
+      [sshd]
+      enabled = true
+      backend = systemd
+      maxretry = 5
+      bantime = 1h
+
+  # Security updates apply themselves. This is most of what "you own OS
+  # patching" actually amounts to on a box this simple.
+  - path: /etc/apt/apt.conf.d/20auto-upgrades
+    permissions: "0644"
+    content: |
+      APT::Periodic::Update-Package-Lists "1";
+      APT::Periodic::Unattended-Upgrade "1";
+      APT::Periodic::AutocleanInterval "7";
+
+  # Two gaps the stock configuration leaves. Kernel and libc updates install
+  # but only take effect after a reboot, which nothing ever does; and Docker CE
+  # comes from Docker's repository, which unattended-upgrades does not include,
+  # so the engine, containerd and runc never update at all. The reboot waits
+  # for 05:30, after the 02:00 backup, the 03:00 import and the Sunday 04:00
+  # restore test; containers come back by themselves (restart: unless-stopped).
+  # The same file goes onto an existing host by hand: README "Host updates".
+  - path: /etc/apt/apt.conf.d/52fireflyx-unattended
+    permissions: "0644"
+    content: |
+      Unattended-Upgrade::Origins-Pattern {
+              "origin=Docker";
+      };
+      Unattended-Upgrade::Automatic-Reboot "true";
+      Unattended-Upgrade::Automatic-Reboot-Time "05:30";
+
+  # Docker's own logs are capped per-container in docker-compose.yml; this
+  # covers anything started outside compose.
+  - path: /etc/docker/daemon.json
+    permissions: "0644"
+    content: |
+      {
+        "log-driver": "json-file",
+        "log-opts": { "max-size": "10m", "max-file": "3" }
+      }
+
+runcmd:
+  # Docker CE from Docker's official repository.
+  - install -m 0755 -d /etc/apt/keyrings
+  - curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+  - chmod a+r /etc/apt/keyrings/docker.asc
+  - echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo $${VERSION_CODENAME}) stable" > /etc/apt/sources.list.d/docker.list
+  - apt-get update
+  - DEBIAN_FRONTEND=noninteractive apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+  - usermod -aG docker ${admin_user}
+  - systemctl enable --now docker
+
+  # Where the repository gets cloned and where backups are staged.
+  - mkdir -p /opt/fireflyx /var/backups/fireflyx
+  - chown -R ${admin_user}:${admin_user} /opt/fireflyx /var/backups/fireflyx
+  - chmod 700 /var/backups/fireflyx
+
+  - systemctl enable --now fail2ban
+  - systemctl restart ssh
+
+final_message: |
+  FireflyX host ready.
+
+  Next:
+    1. Point A records for firefly./pico./next./import. at this machine and WAIT
+       for them to resolve — Caddy cannot obtain certificates otherwise.
+    2. ssh ${admin_user}@<ip>
+    3. git clone <your repo> /opt/fireflyx && cd /opt/fireflyx
+    4. Follow README.md "Bootstrap".

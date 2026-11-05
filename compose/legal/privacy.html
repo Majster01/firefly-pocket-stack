@@ -1,0 +1,140 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Privacy Policy — {{or (env "LEGAL_SITE_NAME") .Host}}</title>
+<style>
+  :root { color-scheme: light dark; }
+  body {
+    font: 16px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    max-width: 46rem; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; color: #1a1a1a; background: #fff;
+  }
+  @media (prefers-color-scheme: dark) { body { color: #e6e6e6; background: #121212; } a { color: #7fb3ff; } }
+  h1 { font-size: 1.75rem; margin-bottom: .25rem; }
+  h2 { font-size: 1.15rem; margin-top: 2rem; }
+  .meta { color: #666; font-size: .9rem; margin-top: 0; }
+  @media (prefers-color-scheme: dark) { .meta { color: #999; } }
+  table { border-collapse: collapse; width: 100%; margin: 1rem 0; font-size: .95rem; }
+  th, td { text-align: left; padding: .5rem .6rem; border-bottom: 1px solid #ddd; vertical-align: top; }
+  @media (prefers-color-scheme: dark) { th, td { border-bottom-color: #333; } }
+  footer { margin-top: 3rem; font-size: .9rem; color: #666; }
+</style>
+</head>
+<body>
+
+<h1>Privacy Policy</h1>
+<p class="meta">Last updated: 31 August 2026</p>
+
+<h2>1. What this service is</h2>
+<p>
+  This is a private, self-hosted installation of
+  <a href="https://www.firefly-iii.org/">Firefly III</a>, a personal finance
+  manager. It is operated by one individual for managing their own household
+  finances. It is <strong>not</strong> a public service, it is not offered to
+  other people, and no accounts are available to anyone else.
+</p>
+
+<h2>2. Data controller</h2>
+<p>
+  {{or (env "LEGAL_OWNER_NAME") "The operator of this server"}} — an individual acting in a personal capacity.<br>
+  Contact: <a href="mailto:{{env "LEGAL_CONTACT_EMAIL"}}">{{env "LEGAL_CONTACT_EMAIL"}}</a>
+</p>
+
+<h2>3. Whose data is processed</h2>
+<p>
+  Only the operator's own data. There is exactly one user of this service, and
+  that user is also the sole data subject. No data belonging to any other
+  person is collected, imported, or processed.
+</p>
+
+<h2>4. What data is processed</h2>
+<ul>
+  <li>Bank account details and transaction history for accounts the operator personally owns, retrieved through Enable Banking with the operator's explicit consent.</li>
+  <li>Financial records the operator enters manually — categories, budgets, notes, and attached documents.</li>
+  <li>Standard server logs (IP address, timestamp, requested URL), retained short-term for security and troubleshooting.</li>
+</ul>
+
+<h2>5. Where it is stored</h2>
+<p>
+  On a single virtual server rented from Hetzner Online GmbH, located in
+  Nuremberg, Germany. All data remains within the European Union. The database
+  is not exposed to the internet and is reachable only from within the server.
+</p>
+
+<h2>6. Third parties involved</h2>
+<p>The following services necessarily receive some data in order to function:</p>
+<table>
+  <tr><th>Provider</th><th>What it receives</th><th>Why</th></tr>
+  <tr>
+    <td>Hetzner Online GmbH (Germany)</td>
+    <td>All stored data, as the hosting provider</td>
+    <td>Runs the server</td>
+  </tr>
+  <tr>
+    <td>Enable Banking Oy (Finland)</td>
+    <td>Account access authorisation and the transaction data it returns</td>
+    <td>Retrieves transactions from the operator's own bank under PSD2</td>
+  </tr>
+  <tr>
+    <td>Anthropic PBC (Claude API)</td>
+    <td>Descriptions, counterparty names, dates, and amounts of uncategorised transactions</td>
+    <td>Suggests a categorisation rule for the operator to approve</td>
+  </tr>
+  <tr>
+    <td>Backblaze Inc.</td>
+    <td>Backups, encrypted on the server before upload</td>
+    <td>Off-site backup storage</td>
+  </tr>
+</table>
+<p>
+  Data is not sold, rented, shared for advertising, or disclosed to anyone else.
+  There are no analytics, trackers, or advertising services on this site.
+</p>
+
+<h2>7. Automated categorisation</h2>
+<p>
+  For transactions that have no category, the description, counterparty name,
+  date, and amount are sent to Anthropic's Claude API, which may look up a
+  merchant name on the web, to suggest a categorisation rule. No account
+  numbers or credentials are sent. A suggestion changes nothing until the
+  operator reviews and approves it. This feature can be turned off entirely,
+  in which case nothing is sent to Anthropic.
+</p>
+
+<h2>8. Retention and deletion</h2>
+<p>
+  Financial records are kept until the operator deletes them. Bank access
+  consent expires automatically under PSD2 rules (typically every 90–180 days)
+  and must be renewed deliberately. Consent can be withdrawn at any time
+  through Enable Banking or by deleting the application, which immediately
+  stops any further access to bank data.
+</p>
+
+<h2>9. Data subject rights</h2>
+<p>
+  As the sole data subject is also the operator and administrator of this
+  system, rights of access, rectification, erasure, and portability are
+  exercised directly through full administrative control of the server and its
+  data. Enquiries may be sent to the contact address above.
+</p>
+
+<h2>10. Security</h2>
+<p>
+  All traffic is served over HTTPS. Administrative access is restricted to SSH
+  key authentication with passwords disabled. Backups are encrypted before
+  leaving the server. Credentials are stored outside version control.
+</p>
+
+<h2>11. Changes</h2>
+<p>
+  This policy may be updated if the setup changes. The date at the top reflects
+  the current version.
+</p>
+
+<footer>
+  <a href="/">Home</a> · <a href="/terms">Terms of Service</a>
+</footer>
+
+</body>
+</html>

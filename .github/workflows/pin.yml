@@ -1,0 +1,60 @@
+# Point a fork's service at a new image, and commit that to master. Merging
+# into master is deploying: the server picks the commit up within two minutes
+# (scripts/deploy.sh, README "Deploying").
+#
+# The forks' CI starts this after pushing an image:
+#   Majster01/firefly-pocket   main      ->  next      sha-<commit>
+#   Majster01/data-importer    fireflyx  ->  importer  <upstream version>-<commit>
+#
+# Pico's repository, Majster01/firefly-pocket-archive, is archived: pin `pico`
+# only by hand, to a tag it built before.
+#
+# Run it by hand (Actions -> Pin fork image -> Run workflow) to roll back to
+# an earlier tag; the "Bump ..." commits in master list them.
+name: Pin fork image
+run-name: Pin ${{ inputs.component }} to ${{ inputs.tag }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      component:
+        description: Service to move
+        type: choice
+        options: [pico, next, importer]
+      tag:
+        description: Image tag in GHCR (sha-abc1234 for Pico and Next, 2.3.5-abc1234 for the importer)
+        type: string
+        required: true
+
+# In order, per service. A newer pin that arrives while one is waiting replaces
+# the waiting one, which is right: the newest image wins.
+concurrency:
+  group: pin-${{ inputs.component }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  pin:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: master
+
+      - name: Pin and push to master
+        env:
+          COMPONENT: ${{ inputs.component }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          scripts/pin.sh "$COMPONENT" "$TAG"
+          # The other service's pin, or a merge, may land in between.
+          for _ in 1 2 3; do
+            git push -q origin HEAD:master && exit 0
+            git pull -q --rebase origin master
+          done
+          exit 1

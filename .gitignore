@@ -1,0 +1,41 @@
+# Secrets — never commit these.
+compose/.env
+compose/secrets/**
+!compose/secrets/.gitkeep
+!compose/secrets/eb/.gitkeep
+
+# Enable Banking private key.
+*.pem
+
+# Hand-exported importer configs from before the importer fork stored bank
+# connections in its database. Each carries this instance's Enable Banking
+# authorisation and session IDs. Bring one in with
+# `fireflyx:connections:adopt` (README); the shared, secret-free settings are
+# the committed config/importer-base.json.
+config/importers/**
+!config/importers/.gitkeep
+
+# The old host-side render target, no longer mounted (the fork renders into the
+# importer_render volume).
+compose/importer/**
+!compose/importer/.gitkeep
+
+# Terraform state contains the API token and server details in plaintext.
+terraform/terraform.tfvars
+terraform/.terraform/
+terraform/.terraform.lock.hcl
+terraform/*.tfstate
+terraform/*.tfstate.*
+terraform/crash.log
+
+# Local backup staging, if anyone points BACKUP_DIR into the repo.
+backups/
+
+.DS_Store
+
+# Deploy agent state on the server (scripts/deploy.sh).
+.deployed-rev
+.deploy-failed
+
+# Python bytecode from running the suggester tests.
+__pycache__/

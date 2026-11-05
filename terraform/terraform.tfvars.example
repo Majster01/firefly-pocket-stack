@@ -1,0 +1,22 @@
+# Copy to terraform.tfvars (gitignored) and fill in.
+
+# Hetzner Cloud -> Security -> API Tokens -> Generate (Read & Write).
+hcloud_token = "REPLACE_ME"
+
+# Your SSH public key, e.g. `cat ~/.ssh/id_ed25519.pub`.
+ssh_public_key = "ssh-ed25519 AAAA... you@example.com"
+
+# Lock SSH to your own address if it is static. This is the single most
+# valuable restriction available here. If your address changes, leave the
+# default and let fail2ban handle it.
+# ssh_source_ips = ["203.0.113.42/32"]
+
+server_name = "fireflyx"
+server_type = "cx22"
+location    = "fsn1" # fsn1/nbg1 = Germany, hel1 = Finland. All EU.
+
+# Must match TZ in compose/.env — cron runs in the host's zone.
+timezone = "Europe/Ljubljana"
+
+# Weekly whole-machine snapshots. ~20% of server cost, worth it.
+enable_hetzner_backups = true

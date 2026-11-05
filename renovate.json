@@ -1,0 +1,39 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "description": "Upstream image updates, offered as PRs on Monday mornings. Merging into master deploys (README \"Deploying\"), so nothing merges by itself.",
+  "extends": ["config:recommended"],
+  "timezone": "Europe/Ljubljana",
+  "schedule": ["* 0-5 * * 1"],
+  "enabledManagers": ["docker-compose", "dockerfile", "custom.regex"],
+  "labels": ["upstream"],
+  "customManagers": [
+    {
+      "customType": "regex",
+      "description": "Images the scripts run directly: curl on the internal network, Caddy for the password hash, Postgres for the restore test, Alpine for the attachments archive",
+      "managerFilePatterns": ["/^scripts/[^/]+\\.sh$/"],
+      "matchStrings": ["(?:_IMAGE=\"|\\s)(?<depName>caddy|postgres|alpine|curlimages/curl):(?<currentValue>[0-9][^\\s\"]*)"],
+      "datasourceTemplate": "docker"
+    }
+  ],
+  "packageRules": [
+    {
+      "description": "The forks are pinned by .github/workflows/pin.yml when their deploy branch moves; the suggester is built on the server",
+      "matchPackageNames": ["ghcr.io/majster01/**", "firefly-pocket-suggester"],
+      "enabled": false
+    },
+    {
+      "description": "Firefly III tags are version-x.y.z. It migrates its database on start",
+      "matchPackageNames": ["fireflyiii/core"],
+      "versioning": "regex:^version-(?<major>\\d+)\\.(?<minor>\\d+)\\.(?<patch>\\d+)$",
+      "sourceUrl": "https://github.com/firefly-iii/firefly-iii",
+      "addLabels": ["firefly-iii"],
+      "prBodyNotes": ["Merging deploys it: the server backs up, proves the backup restores, then starts the new version, which migrates the database. Read the release notes of every version this crosses."]
+    },
+    {
+      "description": "A new Postgres major needs a dump and restore by hand; never offer one",
+      "matchPackageNames": ["postgres"],
+      "matchUpdateTypes": ["major"],
+      "enabled": false
+    }
+  ]
+}

@@ -1,0 +1,55 @@
+# firefly-pocket-stack scheduled jobs.
+#
+# Installed for the admin user (NOT root — the scripts talk to Docker via group
+# membership, and .env is readable only by this user) by every deploy
+# (scripts/deploy.sh). Check with `crontab -l`.
+#
+# Times are in the host timezone, which cloud-init sets and which must match
+# TZ in compose/.env. Check with `timedatectl`.
+#
+# Logs go to /var/log/fireflyx/, a directory OWNED BY THIS USER — not to
+# /var/log/fireflyx-*.log directly. /var/log is root:syslog 0755, so the admin
+# user cannot create a file in it: the `>>` redirect fails, the shell exits
+# before the script runs, and cron discards the error because no MTA is
+# installed. The result is a job that appears in the journal every single night
+# and has never once executed. cloud-init creates the directory; on an existing
+# host:
+#
+#     sudo install -d -o fireflyx -g fireflyx -m 755 /var/log/fireflyx
+
+#
+# Every job holds /run/lock/fireflyx.lock while it runs, the lock the deploy
+# agent (scripts/deploy.sh) takes too: a job waits for a deploy to finish, and a
+# deploy waits for the job. So the import is never cut off by a restart, and two
+# jobs never overlap. A job that cannot get the lock within two hours does not
+# run; the healthchecks.io pings are what notice that.
+#
+# Edit this file, never `crontab -e`: the next deploy would undo that.
+
+SHELL=/bin/bash
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+LOCK="flock -w 7200 /run/lock/fireflyx.lock"
+
+# 02:00 — dump databases, archive attachments, push offsite with restic.
+0 2 * * * $LOCK /opt/fireflyx/scripts/backup.sh >> /var/log/fireflyx/backup.log 2>&1
+
+# 03:00 — bank import, then category suggestions, then Firefly III's own
+# cron. Sequential inside one script so the ordering actually holds even if
+# the import runs long.
+0 3 * * * $LOCK /opt/fireflyx/scripts/nightly.sh >> /var/log/fireflyx/nightly.log 2>&1
+
+# 19:00 every day — the category suggestions digest: one push to the Pico app if
+# suggestions are waiting for review. Nothing is sent when there are none. Each
+# device chooses in Pocket's settings whether it gets it daily, weekly (and on
+# which weekday) or never, so this runs daily and Pocket does the rest.
+0 19 * * * $LOCK /opt/fireflyx/scripts/notify-suggestions.sh >> /var/log/fireflyx/suggestions.log 2>&1
+
+# 04:00 Sunday — prove the backups still restore. A backup you have never
+# restored is a hope, not a plan; this turns that into a weekly fact.
+0 4 * * 0 $LOCK /opt/fireflyx/scripts/restore-test.sh >> /var/log/fireflyx/restore-test.log 2>&1
+
+# 04:30 Sunday — the same, from the offsite (restic) copy, which is the one that
+# matters when this machine is gone. Exits with "RESTIC_REPOSITORY is not set"
+# until offsite backups are configured (the nightly backup alerts about that).
+# Done before the 05:30 window in which unattended-upgrades may reboot.
+30 4 * * 0 $LOCK /opt/fireflyx/scripts/restore-test.sh --from-restic >> /var/log/fireflyx/restore-test.log 2>&1
