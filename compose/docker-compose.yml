@@ -183,9 +183,9 @@ services:
   #
   # Built by Majster01/firefly-pocket's CI (branch main) and tagged
   # sha-<commit>. A merge into its main pins the new tag here through
-  # .github/workflows/pin.yml, which deploys it. The placeholder below is
-  # replaced by the first pin; until then this image cannot be pulled, so
-  # every deploy stops at "pull images" (README "Adding Firefly Pocket").
+  # .github/workflows/pin.yml, which deploys it. The image moves from
+  # firefly-pocket-next to ghcr.io/majster01/firefly-pocket: scripts/pin.sh
+  # rewrites this line to the new name on the first pin under it.
   next:
     image: ghcr.io/majster01/firefly-pocket-next:sha-aacd616
     container_name: fireflyx-next
