@@ -2,9 +2,8 @@
 # deploys, so these are what a change has to pass first. Run the same commands
 # locally before pushing (AGENTS.md "Checks").
 #
-# Three jobs, three checks on the PR. Their names (shellcheck, compose,
-# suggester) are what branch protection requires, so rename them only together
-# with that setting.
+# One check per job. Their names (shellcheck, compose, suggester, boot) are
+# what master's ruleset requires, so rename them only together with it.
 name: CI
 
 on:
@@ -70,3 +69,15 @@ jobs:
           docker run --rm --network none \
             -v "$PWD/services/category-suggester/tests:/app/tests:ro" \
             --entrypoint python suggester:ci -m unittest -v
+
+  # The whole stack from scratch, as a new server starts it, checked with the
+  # deploy's own smoke test (Release pipeline step 4). On a pin PR this boots
+  # the new image before it can reach the server.
+  boot:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Boot the stack and run the deploy's smoke test
+        run: scripts/boot-test.sh

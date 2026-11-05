@@ -151,31 +151,6 @@ caddyfile_changed() {
   [ -z "$old" ] || ! git diff --quiet "$old" "$new" -- compose/Caddyfile 2>/dev/null
 }
 
-# The apps answer on the internal network (Firefly III may still be migrating,
-# so each gets five minutes), and every service compose starts runs. Firefly
-# Pocket's /api/test is a plain Laravel route: nginx, php-fpm and the app, no
-# Firefly call and no login.
-smoke_test() {
-  local url svc down="" _
-  for url in http://app:8080/health http://importer:8080/health \
-             http://next:80/ http://next:80/api/test; do
-    for _ in $(seq 30); do
-      internal_http "$url" 10 >/dev/null 2>&1 && continue 2
-      sleep 10
-    done
-    echo "no answer from $url after five minutes"
-    return 1
-  done
-  for svc in $(compose config --services); do
-    [ -n "$(compose ps -q --status running "$svc")" ] || down="$down $svc"
-  done
-  if [ -n "$down" ]; then
-    echo "not running:$down"
-    return 1
-  fi
-  echo "Firefly III, the importer and Firefly Pocket answer; every service runs"
-}
-
 echo "==> deploy $(git log --oneline -1) (last deployed: ${old:0:7})"
 github_status "$new" pending "deploying"
 
