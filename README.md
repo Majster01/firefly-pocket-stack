@@ -438,7 +438,7 @@ Rules:
 - **Roll back a fork or the suggester**: Actions → *Pin fork image* → *Run workflow* with the service and an earlier tag (the `Bump …` commits in `master` list them). It opens a pin PR that merges itself, like any other. Anything else: *Revert* on the merged PR in GitHub, which opens a PR that undoes it. Rolling back an image that has migrated a database also needs that database restored ([Restoring](#restoring)).
 - **What runs now**: `cat /opt/fireflyx/.deployed-rev`; the log is `journalctl -u fireflyx-deploy`.
 
-Optional: with `DEPLOY_STATUS_TOKEN` in `.env` (a fine-grained token for this repository only, *Commit statuses: Read and write*), every commit in GitHub shows a `deploy/server` status: pending, success or failure.
+With `DEPLOY_STATUS_TOKEN` in `.env` (a fine-grained token for this repository only, *Commit statuses: Read and write*), every commit in GitHub shows a `deploy/server` status: pending, success or failure. A release needs it: that status is the canary gate's evidence ([Releasing](#releasing)). Without it, or with a token for another repository, the deploy only logs `WARN: could not set the GitHub commit status`.
 
 Optional: `NEXT_WARMUP_FIREFLY_TOKEN` in `.env` (a separate Firefly token of your user) turns on Firefly Pocket's cache warm-up; then `scripts/deploy.sh --force`. Firefly III's webhooks stay off, so Firefly Pocket's cache learns about changes made outside it only from its own changes and its TTL.
 
@@ -481,7 +481,9 @@ A release names one bundle that has already run as `latest`, and promotes it wit
 | `X.Y` | every release in that line | fixes only |
 | `X.Y.Z`, `sha-<commit>` | never | pinning and rollback |
 
-The bump says what a person running a server has to do: **major**, act (a value only they can give, a Postgres major, a hostname change); **minor**, nothing, migrations included; **patch**, fixes only. The first release is `1.0.0` whatever the bump. A release only moves forward: it refuses a commit older than the last release, one that is not on `master`, and one without a published bundle. The bundle's `release.json` keeps the build number it was published with (`1.0.0-dev.<n>`); the release's version is its tag.
+The bump says what a person running a server has to do: **major**, act (a value only they can give, a Postgres major, a hostname change); **minor**, nothing, migrations included; **patch**, fixes only. The first release is `1.0.0` whatever the bump. A release only moves forward: it refuses a commit older than the last release, one that is not on `master`, and one without a published bundle.
+
+**The canary gate.** Your server is the canary: a commit can be released only once its `deploy/server` status has been `success` for 24 hours, counted from its first successful deploy since the last failed one. So a `deploy.sh --force` does not restart the clock, and a failed deploy does. A commit the server never deployed has no status and cannot be released. A refusal says when the commit becomes eligible. *Skip the canary* is for an urgent fix only, and its release notes say it skipped. The bundle's `release.json` keeps the build number it was published with (`1.0.0-dev.<n>`); the release's version is its tag.
 
 ### Updating Firefly III
 
