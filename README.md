@@ -466,7 +466,7 @@ The old laptop deploys (`deploy-pico.sh`, `deploy-firefly.sh`, `deploy-cron.sh`,
 4. **Protect `master`.** *Settings* → *Rules* → *Rulesets* → *New branch ruleset*: name `master`, *Enforcement status* Active, *Target branches* → *Include default branch*, and nothing in *Bypass list*. Rules: *Restrict deletions*, *Block force pushes*, *Require a pull request before merging* (0 approvals), and *Require status checks to pass* with `shellcheck`, `compose`, `suggester` and `boot`. Leave *Require branches to be up to date before merging* off, so two pins waiting at once both merge.
 5. **Security.** *Settings* → *Advanced Security*: *Private vulnerability reporting*, *Secret scanning* and *Push protection* on. `SECURITY.md` points reporters at the first.
 
-From then on a pin arrives as a PR from the app, *Bump Next to abc1234*, that merges itself when the checks pass, usually within ten minutes (`boot` takes the longest), and the merge deploys. A pin PR left open has a failed check; its CI run says which. Each service has one branch, `pin/<service>`: a newer pin replaces a waiting one, and a pin of the tag `master` already runs closes it.
+From then on a pin arrives as a PR from the app, *Bump Next to abc1234*, that merges itself when the checks pass, usually within a few minutes (`boot` takes the longest, about a minute and a half), and the merge deploys. A pin PR left open has a failed check; its CI run says which. Each service has one branch, `pin/<service>`: a newer pin replaces a waiting one, and a pin of the tag `master` already runs closes it.
 
 ### Updating Firefly III
 
