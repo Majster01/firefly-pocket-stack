@@ -24,7 +24,7 @@ class FireflyError(Exception):
 class Txn:
     """One split (journal) of a Firefly transaction group."""
 
-    transaction_id: int  # the group id: Pico route /transactions/{id}
+    transaction_id: int  # the transaction group id
     journal_id: int  # the split that carries the category
     type: str
     date: str
