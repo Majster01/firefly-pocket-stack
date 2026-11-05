@@ -181,6 +181,7 @@ package_label() {
     importer) echo "Data importer" ;;
     dozzle) echo "Dozzle" ;;
     socket-proxy) echo "Docker socket proxy" ;;
+    suggester) echo "Category suggester" ;;
     *) echo "$1" ;;
   esac
 }
@@ -201,8 +202,7 @@ package_version() {
 #
 # One line per package whose image changed between the two revisions, as a
 # person would say it: "Firefly III 6.6.6 → 6.7.0", or just "Firefly Pocket"
-# when only a build changed. The category suggester is built on the server, so
-# a change to its code counts too. Nothing when no package changed.
+# when only a build changed. Nothing when no package changed.
 upgraded_packages() {
   local old="$1" new="$2" old_images new_images svc image previous label from to
   [ -n "$old" ] && [ -n "$new" ] || return 0
@@ -213,9 +213,6 @@ upgraded_packages() {
     previous="$(awk -v s="$svc" '$1 == s { print $2 }' <<<"$old_images")"
     # A service that is new is not an upgrade, one whose tag is the same is not either
     { [ -n "$previous" ] && [ "$previous" != "$image" ]; } || continue
-    # An image built here (the suggester, :local) has no release; the check of
-    # its code below is what says it changed
-    [[ "$image" == *:local ]] && continue
     label="$(package_label "$svc")"
     from="$(package_version "$previous")"
     to="$(package_version "$image")"
@@ -225,9 +222,6 @@ upgraded_packages() {
       echo "$label"
     fi
   done <<<"$new_images"
-  # Exit 1 is "differs"; anything else (a revision git does not have) says nothing
-  git -C "$REPO_ROOT" diff --quiet "$old" "$new" -- services/category-suggester 2>/dev/null
-  [ $? -ne 1 ] || echo "Category suggester"
   return 0
 }
 

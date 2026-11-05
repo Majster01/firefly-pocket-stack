@@ -1,10 +1,11 @@
-# Point a fork's service at a new image, and commit that to master. Merging
-# into master is deploying: the server picks the commit up within two minutes
+# Point a service at a new image, and commit that to master. Merging into
+# master is deploying: the server picks the commit up within two minutes
 # (scripts/deploy.sh, README "Deploying").
 #
-# The forks' CI starts this after pushing an image:
-#   Majster01/firefly-pocket   main      ->  next      sha-<commit>
-#   Majster01/data-importer    fireflyx  ->  importer  <upstream version>-<commit>
+# The CI that built the image starts this after pushing it:
+#   Majster01/firefly-pocket   main      ->  next       sha-<commit>
+#   Majster01/data-importer    fireflyx  ->  importer   <upstream version>-<commit>
+#   this repository (suggester.yml)  master  ->  suggester  sha-<commit>
 #
 # Run it by hand (Actions -> Pin fork image -> Run workflow) to roll back to
 # an earlier tag; the "Bump ..." commits in master list them.
@@ -17,9 +18,9 @@ on:
       component:
         description: Service to move
         type: choice
-        options: [next, importer]
+        options: [next, importer, suggester]
       tag:
-        description: Image tag in GHCR (sha-abc1234 for Next, 2.3.5-abc1234 for the importer)
+        description: Image tag in GHCR (sha-abc1234 for Next and the suggester, 2.3.5-abc1234 for the importer)
         type: string
         required: true
 

@@ -14,14 +14,14 @@
 # are never touched.
 #
 # The steps, stopping and alerting at the first failure:
-#   1. pull every image. If one is missing, nothing has restarted yet
-#   2. build the category suggester, the one image built here
-#   3. if the image of Firefly III, Postgres or the importer is about to change:
+#   1. pull every image. If one is missing, nothing has restarted yet. Nothing
+#      is built here: every image comes from a registry, the suggester's too
+#   2. if the image of Firefly III, Postgres or the importer is about to change:
 #      back up, and prove the backup restores. They migrate databases on start
-#   4. docker compose up -d --remove-orphans: compose restarts only what changed
-#      (and Caddy, when the Caddyfile changed)
-#   5. install the crontab
-#   6. check that Firefly III, the importer and Firefly Pocket answer and every
+#   3. docker compose up -d --no-build --remove-orphans: compose restarts only
+#      what changed (and Caddy, when the Caddyfile changed)
+#   4. install the crontab
+#   5. check that Firefly III, the importer and Firefly Pocket answer and every
 #      service runs
 #
 # A failure goes to ntfy and the Firefly Pocket app. A success that upgraded a package
@@ -115,7 +115,9 @@ step() {
   run_step "deploy $short: $name" "$@" || stop "$name"
 }
 
-# A registry hiccup should not need a --force.
+# A registry hiccup should not need a --force. --ignore-buildable only matters
+# until the suggester's first pin: until then its image is the one the server
+# built, which no registry has.
 pull_images() {
   local attempt
   for attempt in 1 2 3; do
@@ -178,12 +180,12 @@ echo "==> deploy $(git log --oneline -1) (last deployed: ${old:0:7})"
 github_status "$new" pending "deploying"
 
 step "pull images" pull_images
-step "build the category suggester" compose build --quiet suggester
 if needs_backup; then
   step "backup" "$REPO_ROOT/scripts/backup.sh"
   step "restore test" "$REPO_ROOT/scripts/restore-test.sh"
 fi
-step "start what changed" compose up -d --remove-orphans
+# --no-build: an image that is missing stops the deploy instead of being built here.
+step "start what changed" compose up -d --no-build --remove-orphans
 if caddyfile_changed; then
   step "recreate Caddy for the new Caddyfile" compose up -d --force-recreate caddy
 fi

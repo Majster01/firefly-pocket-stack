@@ -398,22 +398,22 @@ To find duplicates already imported, group transactions by `external_id`; any gr
 
 ```
 fork merge ─► fork CI builds and pushes the image ─► "Pin fork image" commits its tag ─┐
+suggester change merged ─► "Suggester image" builds and pushes it ─► the same pin ─────┤
 Renovate PR (Firefly III, Postgres, Caddy, …) ─► CI ─► you merge ──────────────────────┼─► master
 your change ─► PR ─► CI ─► you merge ──────────────────────────────────────────────────┘     │
                                                                                             ▼
                                           server, every 2 minutes: git fetch ─► scripts/deploy.sh
 ```
 
-Every PR into `master` runs CI (`.github/workflows/ci.yml`), three checks: `shellcheck` on every script, `compose` (`docker compose config` with a `.env` made the way a new server makes one, by `scripts/gen-secrets.sh`), and `suggester` (its tests, inside the image the server runs). Merge only when all three are green. The forks' pins go straight to `master` without them; a fork's own CI has checked that change.
+Every PR into `master` runs CI (`.github/workflows/ci.yml`), three checks: `shellcheck` on every script, `compose` (`docker compose config` with a `.env` made the way a new server makes one, by `scripts/gen-secrets.sh`), and `suggester` (its tests, inside the image the server runs). Merge only when all three are green. Pins go straight to `master` without them: the CI that built the image has checked that change.
 
 The server pulls; nothing logs into it to deploy. `/opt/fireflyx` is a git checkout of `master`, fetched over HTTPS without credentials. Every two minutes `fireflyx-deploy.timer` runs `scripts/deploy.sh`, and when `master` has moved, that resets the checkout to it and:
 
-1. pulls every image. If one is missing, nothing has restarted;
-2. builds the category suggester, the one image built on the server;
-3. if Firefly III's, Postgres' or the importer's image is changing: backs up, and proves the backup restores. They migrate a database on start;
-4. runs `docker compose up -d --remove-orphans`, which restarts only services whose image or settings changed (and Caddy when the Caddyfile changed);
-5. installs `crontab`;
-6. checks that Firefly III, the importer and Firefly Pocket (`/` and `/api/test`) answer and that every service runs.
+1. pulls every image. If one is missing, nothing has restarted. Nothing is built on the server, the suggester included;
+2. if Firefly III's, Postgres' or the importer's image is changing: backs up, and proves the backup restores. They migrate a database on start;
+3. runs `docker compose up -d --no-build --remove-orphans`, which restarts only services whose image or settings changed (and Caddy when the Caddyfile changed);
+4. installs `crontab`;
+5. checks that Firefly III, the importer and Firefly Pocket (`/` and `/api/test`) answer and that every service runs.
 
 A failure arrives as a push (ntfy and the Firefly Pocket app): `Firefly Pocket: deploy abc1234: <step> FAILED` with the step's output. A success says something only when it upgraded a package: "Upgrade successful" in the Firefly Pocket app. A revision that failed is not tried again until `master` moves; `scripts/deploy.sh --force` on the server retries it. Untracked files (`compose/.env`, `compose/secrets/`, `config/importers/`) are never touched.
 
@@ -424,7 +424,8 @@ The deploy and the cron jobs share one lock, `/run/lock/fireflyx.lock`: a deploy
 | Firefly Pocket | merge into `main` of [firefly-pocket](https://github.com/Majster01/firefly-pocket) | `next` |
 | The importer fork | merge into `fireflyx` of [data-importer](https://github.com/Majster01/data-importer) | `importer`, after a backup and restore test |
 | Firefly III, Postgres, Caddy, Dozzle, the socket proxy, the images the scripts use | Renovate opens a PR on Monday mornings; merge it | that service; Firefly III and Postgres after a backup and restore test |
-| Anything in this repository: compose, Caddyfile, scripts, `crontab`, the suggester, `config/importer-base.json` | merge into `master` | whatever compose sees changed |
+| The category suggester (`services/category-suggester`) | merge into `master`; *Suggester image* builds and tests the image, then "Pin fork image" commits its tag | `suggester-trigger`; the nightly run uses it the same night |
+| Anything else in this repository: compose, Caddyfile, scripts, `crontab`, `config/importer-base.json` | merge into `master` | whatever compose sees changed |
 | `compose/.env` (only on the server) | edit it there, then `scripts/deploy.sh --force` | the services whose environment changed |
 
 Rules:
