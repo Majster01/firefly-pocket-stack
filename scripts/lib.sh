@@ -1,3 +1,4 @@
+# shellcheck shell=bash
 # Shared helpers for the firefly-pocket-stack maintenance scripts.
 # Sourced, not executed.
 
@@ -344,7 +345,7 @@ check_importer_errors() {
     quiet_conversion=1
   fi
   if [ -n "$bad" ]; then
-    echo "importer finished with: $(printf '%s ' $bad)"
+    echo "importer finished with: ${bad//$'\n'/ }"
     printf '%s\n' "$log" | grep -E '\.(ERROR|CRITICAL|ALERT|EMERGENCY):' | tail -n 15
     return 1
   fi
@@ -366,7 +367,7 @@ check_importer_errors() {
     return 1
   fi
 
-  echo "importer outcome: $(printf '%s ' $verdicts)"
+  echo "importer outcome: ${verdicts//$'\n'/ }"
   return 0
 }
 

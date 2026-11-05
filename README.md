@@ -398,11 +398,13 @@ To find duplicates already imported, group transactions by `external_id`; any gr
 
 ```
 fork merge ─► fork CI builds and pushes the image ─► "Pin fork image" commits its tag ─┐
-Renovate PR (Firefly III, Postgres, Caddy, …) ─► you merge ────────────────────────────┼─► master
-your change ─► PR ─► you merge ────────────────────────────────────────────────────────┘     │
+Renovate PR (Firefly III, Postgres, Caddy, …) ─► CI ─► you merge ──────────────────────┼─► master
+your change ─► PR ─► CI ─► you merge ──────────────────────────────────────────────────┘     │
                                                                                             ▼
                                           server, every 2 minutes: git fetch ─► scripts/deploy.sh
 ```
+
+Every PR into `master` runs CI (`.github/workflows/ci.yml`), three checks: `shellcheck` on every script, `compose` (`docker compose config` with a `.env` made the way a new server makes one, by `scripts/gen-secrets.sh`), and `suggester` (its tests, inside the image the server runs). Merge only when all three are green. The forks' pins go straight to `master` without them; a fork's own CI has checked that change.
 
 The server pulls; nothing logs into it to deploy. `/opt/fireflyx` is a git checkout of `master`, fetched over HTTPS without credentials. Every two minutes `fireflyx-deploy.timer` runs `scripts/deploy.sh`, and when `master` has moved, that resets the checkout to it and:
 
