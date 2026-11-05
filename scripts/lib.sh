@@ -253,6 +253,32 @@ internal_http() {
     --fail --silent --show-error --location --max-time "$timeout" "$url"
 }
 
+# smoke_test: the apps answer on the internal network (Firefly III may still be
+# migrating, so each gets five minutes), and every service compose starts runs.
+# Firefly Pocket's /api/test is a plain Laravel route: nginx, php-fpm and the
+# app, no Firefly call and no login. The deploy's last step, and what CI checks
+# a booted stack with (scripts/boot-test.sh).
+smoke_test() {
+  local url svc down="" _
+  for url in http://app:8080/health http://importer:8080/health \
+             http://next:80/ http://next:80/api/test; do
+    for _ in $(seq 30); do
+      internal_http "$url" 10 >/dev/null 2>&1 && continue 2
+      sleep 10
+    done
+    echo "no answer from $url after five minutes"
+    return 1
+  done
+  for svc in $(docker compose --project-directory "$COMPOSE_DIR" config --services); do
+    [ -n "$(docker compose --project-directory "$COMPOSE_DIR" ps -q --status running "$svc")" ] || down="$down $svc"
+  done
+  if [ -n "$down" ]; then
+    echo "not running:$down"
+    return 1
+  fi
+  echo "Firefly III, the importer and Firefly Pocket answer; every service runs"
+}
+
 # Same, but POST. internal_http_post <url> [max-seconds]
 #
 # The importer declares its trigger as `Route::post('/autoimport', ...)`, so a
