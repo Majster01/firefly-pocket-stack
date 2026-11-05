@@ -198,7 +198,7 @@ services:
       # Also the timezone the cache of Firefly answers expires at midnight in.
       TZ: ${TZ:-Etc/UTC}
       DB_CONNECTION: pgsql
-      DB_HOST: db
+      DB_HOST: db-typo
       DB_PORT: "5432"
       DB_DATABASE: firefly_next
       DB_USERNAME: next
