@@ -4,6 +4,10 @@
 # tags X.Y.Z, X.Y and stable on the commit's published bundle, by digest and
 # without rebuilding, then the git tag and a GitHub release that lists the
 # components. Tick "Dry run" first to see the version and the notes.
+#
+# The canary gate (Release pipeline step 7) refuses a commit whose deploy/server
+# status, the one your server sets when it deploys, has not been success for 24
+# hours. "Skip the canary" is for an urgent fix only; the release notes say so.
 name: Release
 run-name: ${{ inputs.dry_run && 'Dry run' || 'Release' }} (${{ inputs.bump }}) of ${{ inputs.commit || 'master' }}
 
@@ -22,6 +26,10 @@ on:
         description: Dry run, says what it would do and changes nothing
         type: boolean
         default: false
+      skip_canary:
+        description: Skip the canary, release without 24 hours on your server (an urgent fix only)
+        type: boolean
+        default: false
 
 concurrency:
   group: release
@@ -36,6 +44,7 @@ jobs:
     permissions:
       contents: write   # the git tag and the GitHub release
       packages: write   # the bundle's release tags
+      statuses: read    # the canary gate reads deploy/server
     steps:
       - uses: actions/checkout@v5
         with:
@@ -51,6 +60,8 @@ jobs:
       - name: ${{ inputs.dry_run && 'Dry run' || 'Release' }}
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          SKIP_CANARY: ${{ inputs.skip_canary && '1' || '' }}
           BUMP: ${{ inputs.bump }}
           COMMIT: ${{ inputs.commit }}
           DRY_RUN: ${{ inputs.dry_run && '1' || '' }}
