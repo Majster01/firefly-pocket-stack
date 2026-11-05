@@ -5,58 +5,87 @@
 #
 #     ssh <server> 'bash -s' < scripts/install-deploy-agent.sh
 #
-# 1. A read-only deploy key for this repository, ~/.ssh/fireflyx_deploy. The
-#    first run creates it, prints it and stops: add it to the repository under
-#    Settings -> Deploy keys, without write access, then run this again.
-# 2. /opt/fireflyx becomes a git checkout of master. A copy made by the old
+# 1. /opt/fireflyx becomes a git checkout of master, fetched over HTTPS: this
+#    repository is public, so the server needs no key. A copy made by the old
 #    rsync deploys keeps every file git does not track (compose/.env,
 #    compose/secrets/, config/importers/), and its tracked files are reset to
 #    the revision it was last deployed at, so nothing changes yet.
-# 3. fireflyx-deploy.timer: scripts/deploy.sh every two minutes. Its first run
+# 2. fireflyx-deploy.timer: scripts/deploy.sh every two minutes. Its first run
 #    deploys master. Skipped while compose/.env does not exist (a new server
 #    in the middle of the README setup); run this again at the end of it.
+#
+# A private fork sets REPO_URL to its SSH address instead,
+#
+#     ssh <server> 'REPO_URL=git@github.com:<owner>/<repo>.git bash -s' < scripts/install-deploy-agent.sh
+#
+# and fetches with a read-only deploy key, ~/.ssh/fireflyx_deploy: the first
+# run creates it, prints it and stops. Add it to the repository under Settings
+# -> Deploy keys, without write access, then run this again. Which of the two
+# is used follows the checkout's origin, so a server whose origin was moved to
+# HTTPS stops using its key.
 #
 # Safe to run again.
 
 set -euo pipefail
 
-REPO_URL="${REPO_URL:-git@github.com:Majster01/firefly-pocket-stack.git}"
-REPO_DIR=/opt/fireflyx
+REPO_URL="${REPO_URL:-https://github.com/Majster01/firefly-pocket-stack.git}"
+REPO_DIR="${REPO_DIR:-/opt/fireflyx}"
 KEY="$HOME/.ssh/fireflyx_deploy"
 # GitHub's published ED25519 host key fingerprint (docs.github.com, "GitHub's
 # SSH key fingerprints"), so the first connection is not trust-on-first-use.
 GITHUB_FP="SHA256:+DiY3wvvV6TuJJhbpZisF/zLDA0zPMSvHdkr4UvCOqU"
 
-# ------------------------------------------------------------ deploy key ---
-install -d -m 700 "$HOME/.ssh"
-if [ ! -f "$KEY" ]; then
-  ssh-keygen -q -t ed25519 -N '' -C "fireflyx-deploy@$(hostname -s)" -f "$KEY" </dev/null
-  cat <<EOF
-Created a deploy key. Add it to GitHub: ${REPO_URL#git@github.com:} -> Settings ->
+cd "$REPO_DIR"
+[ -d .git ] || git init -q -b master
+git remote get-url origin >/dev/null 2>&1 || git remote add origin "$REPO_URL"
+origin="$(git remote get-url origin)"
+
+# ------------------------------------------------------------ access ---
+case "$origin" in
+  https://*)
+    # Public: nothing to authenticate. A key left from an SSH checkout is
+    # not used any more.
+    git config --unset core.sshCommand || true
+    if [ -f "$KEY" ]; then
+      echo "==> origin is $origin, so $KEY is not used any more."
+      echo "    Remove it from the old repository's Settings -> Deploy keys, then: rm $KEY $KEY.pub"
+    fi
+    ;;
+  git@github.com:*)
+    install -d -m 700 "$HOME/.ssh"
+    if [ ! -f "$KEY" ]; then
+      ssh-keygen -q -t ed25519 -N '' -C "fireflyx-deploy@$(hostname -s)" -f "$KEY" </dev/null
+      cat <<EOF
+Created a deploy key. Add it to GitHub: ${origin#git@github.com:} -> Settings ->
 Deploy keys -> Add deploy key. Any title; leave "Allow write access" OFF.
 
 $(cat "$KEY.pub")
 
 Then run this script again.
 EOF
-  exit 0
-fi
+      exit 0
+    fi
 
-if ! ssh-keygen -F github.com -f "$HOME/.ssh/known_hosts" >/dev/null 2>&1; then
-  scanned="$(ssh-keyscan -t ed25519 github.com 2>/dev/null)"
-  fp="$(printf '%s\n' "$scanned" | ssh-keygen -lf - | awk '{print $2}')"
-  if [ "$fp" != "$GITHUB_FP" ]; then
-    echo "FATAL: github.com offered host key ${fp:-none}, expected $GITHUB_FP." >&2
+    if ! ssh-keygen -F github.com -f "$HOME/.ssh/known_hosts" >/dev/null 2>&1; then
+      # No answer from github.com:22 leaves nothing to fingerprint: say so below
+      # rather than stop here without a word.
+      scanned="$(ssh-keyscan -t ed25519 github.com 2>/dev/null || true)"
+      fp="$(printf '%s\n' "$scanned" | ssh-keygen -lf - 2>/dev/null | awk '{print $2}' || true)"
+      if [ "$fp" != "$GITHUB_FP" ]; then
+        echo "FATAL: github.com offered host key ${fp:-none}, expected $GITHUB_FP." >&2
+        exit 1
+      fi
+      printf '%s\n' "$scanned" >> "$HOME/.ssh/known_hosts"
+    fi
+    git config core.sshCommand "ssh -i $KEY -o IdentitiesOnly=yes"
+    ;;
+  *)
+    echo "FATAL: origin is $origin; expected https://github.com/... or git@github.com:..." >&2
     exit 1
-  fi
-  printf '%s\n' "$scanned" >> "$HOME/.ssh/known_hosts"
-fi
+    ;;
+esac
 
 # --------------------------------------------------------- git checkout ---
-cd "$REPO_DIR"
-[ -d .git ] || git init -q -b master
-git remote get-url origin >/dev/null 2>&1 || git remote add origin "$REPO_URL"
-git config core.sshCommand "ssh -i $KEY -o IdentitiesOnly=yes"
 # </dev/null: under `bash -s` the script itself is stdin, and ssh would eat it.
 git fetch -q origin master </dev/null
 
