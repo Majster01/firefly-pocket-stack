@@ -13,6 +13,14 @@
       "managerFilePatterns": ["/^scripts/[^/]+\\.sh$/"],
       "matchStrings": ["(?:_IMAGE=\"|\\s)(?<depName>caddy|postgres|alpine|curlimages/curl):(?<currentValue>[0-9][^\\s\"]*)"],
       "datasourceTemplate": "docker"
+    },
+    {
+      "customType": "regex",
+      "description": "Images the CI workflows run directly: shellcheck. Its tags are vX.Y.Z",
+      "managerFilePatterns": ["/^\\.github/workflows/[^/]+\\.yml$/"],
+      "matchStrings": ["_IMAGE: (?<depName>koalaman/shellcheck):(?<currentValue>v[0-9][^\\s\"]*)"],
+      "datasourceTemplate": "docker",
+      "versioningTemplate": "regex:^v(?<major>\\d+)\\.(?<minor>\\d+)\\.(?<patch>\\d+)$"
     }
   ],
   "packageRules": [
