@@ -359,8 +359,7 @@ services:
   # a change locally:
   #   docker build -t firefly-pocket-suggester:dev ../services/category-suggester
   suggester:
-    build: ../services/category-suggester  # until its first pin, which moves the image to GHCR and drops this line
-    image: firefly-pocket-suggester:local
+    image: ghcr.io/majster01/firefly-pocket-suggester:sha-7051d40
     profiles: [jobs]
     logging: *default-logging
     networks: [fireflyx]
