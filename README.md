@@ -76,10 +76,9 @@ Optionally add a CAA record, so no certificate authority other than Let's Encryp
 
 ## 3. Configure
 
-The server gets this repository through a read-only deploy key, so the first command, run from your laptop, creates that key and prints it. Add it under the repository's **Settings → Deploy keys** (no write access), then run the same command again to check out `master` into `/opt/fireflyx`:
+The server fetches this repository over HTTPS. It is public, so the server needs no key. From your laptop, check out `master` into `/opt/fireflyx`:
 
 ```bash
-ssh fireflyx@<ip> 'bash -s' < scripts/install-deploy-agent.sh   # prints the deploy key
 ssh fireflyx@<ip> 'bash -s' < scripts/install-deploy-agent.sh   # checks out /opt/fireflyx
 
 ssh fireflyx@<ip>
@@ -91,6 +90,8 @@ $EDITOR compose/.env              # hostnames, ACME_EMAIL, SITE_OWNER, TZ
 ```
 
 `gen-secrets.sh` prints the importer's basic-auth password **once** — save it now, it is not recoverable. The script is safe to re-run; it only fills values that are empty and never overwrites an existing secret.
+
+A private fork is fetched with a read-only deploy key instead. Give the script the fork's SSH address: `ssh fireflyx@<ip> 'REPO_URL=git@github.com:<owner>/<repo>.git bash -s' < scripts/install-deploy-agent.sh`. Its first run prints the key; add it under the fork's **Settings → Deploy keys** (no write access), then run the same command again to check out `master`.
 
 ## 4. Bootstrap — stage 1
 
@@ -405,7 +406,7 @@ your change ─► PR ─► you merge ─────────────�
                                           server, every 2 minutes: git fetch ─► scripts/deploy.sh
 ```
 
-The server pulls; nothing logs into it to deploy. `/opt/fireflyx` is a git checkout of `master`, read with a read-only deploy key. Every two minutes `fireflyx-deploy.timer` runs `scripts/deploy.sh`, and when `master` has moved, that resets the checkout to it and:
+The server pulls; nothing logs into it to deploy. `/opt/fireflyx` is a git checkout of `master`, fetched over HTTPS without credentials. Every two minutes `fireflyx-deploy.timer` runs `scripts/deploy.sh`, and when `master` has moved, that resets the checkout to it and:
 
 1. pulls every image. If one is missing, nothing has restarted;
 2. builds the category suggester, the one image built on the server;
@@ -466,7 +467,6 @@ The old laptop deploys (`deploy-pico.sh`, `deploy-firefly.sh`, `deploy-cron.sh`,
 3. **Merge both forks' changes.** Their first CI run builds and pushes the image, then starts *Pin fork image*, and that first pin fails: a new GHCR package is private, and the server pulls without a login. Make both public (your GitHub profile → *Packages* → `firefly-pocket` and `data-importer` → *Package settings* → *Change visibility* → *Public*), then re-run the two failed *Pin fork image* runs.
 4. **Install the deploy agent**, from the laptop:
    ```bash
-   ssh <server> 'bash -s' < scripts/install-deploy-agent.sh   # prints a deploy key: Settings → Deploy keys, read-only
    ssh <server> 'bash -s' < scripts/install-deploy-agent.sh   # git checkout + timer
    ```
    It lists the files on the server that git does not track, which are mostly files deleted from the repository after they were synced; delete the stale ones. Within two minutes the first deploy runs: it pulls both GHCR images (the importer counts as a new image, so a backup and restore test come first) and installs the crontab with the shared lock.
