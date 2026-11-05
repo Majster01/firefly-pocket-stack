@@ -1,4 +1,4 @@
-"""The `pico-suggestion:v1` contract shared with Firefly Pocket.
+"""The `firefly-pocket-suggestion:v1` contract shared with Firefly Pocket.
 
 Source of truth: docs/rule-suggestions.md in this repository. Everything that
 touches the wire format of a suggestion rule lives here, so the two sides can be
@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 
 from .firefly import Txn
 
-MARKER = "pico-suggestion:v1"
+MARKER = "firefly-pocket-suggestion:v1"
 CONTRACT_MAJOR = 1
 
 GROUP_CATEGORIZATION = "Categorization"
@@ -129,7 +129,7 @@ class Suggestion:
             "rule_group_id": group_id,
             "active": False,  # a suggestion never fires
             "trigger": "store-journal",
-            # Same settings as the Category: rules, so Pico can copy triggers across.
+            # Same settings as the Category: rules, so Firefly Pocket can copy triggers across.
             "strict": False,
             "stop_processing": True,
             "triggers": [
