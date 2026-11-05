@@ -35,32 +35,12 @@
 	reverse_proxy app:8080
 }
 
-# Firefly Pico — NO login of its own: it is unlocked by the Firefly III Personal
-# Access Token stored in the browser, and every API call it makes checks that
-# token with Firefly III. Note port 80, not 8080.
+# Firefly Pocket — no login of its own: it is unlocked by a Firefly III
+# Personal Access Token in the browser. Note port 80, not 8080.
 #
-# /api/internal/* (the Web Push endpoint this stack's alert senders call) is for
-# the internal network only; it answers here too, so refuse it outright (it is
-# also token-guarded).
-{$PICO_HOSTNAME} {
-	import security_headers
-
-	@pico_internal path /api/internal /api/internal/*
-
-	route {
-		handle @pico_internal {
-			respond 404
-		}
-		handle {
-			reverse_proxy pico:80
-		}
-	}
-}
-
-# Firefly Pocket — the redesign of Pico, the same way in: no login of its own,
-# unlocked by a Firefly III Personal Access Token in the browser. Port 80 too.
-# Its /api/internal/* (Web Push receiver, Firefly webhook) is for the internal
-# network only, so it is refused here as on Pico's site.
+# Its /api/internal/* (the Web Push receiver this stack's alert senders call,
+# the Firefly webhook) is for the internal network only; it answers here too,
+# so refuse it outright (it is also token-guarded).
 {$NEXT_HOSTNAME} {
 	import security_headers
 
@@ -88,7 +68,7 @@
 {$IMPORT_HOSTNAME} {
 	import security_headers
 
-	# Consent callbacks of re-links started from Pico. Enable Banking only
+	# Consent callbacks of links started from Firefly Pocket. Enable Banking only
 	# redirects to the registered /eb-callback, so both flows arrive there; the
 	# fork's state is "fx-" + hex, upstream's is a UUID. Ours skip basic auth —
 	# the phone coming back from the bank has no credentials — and are
@@ -97,7 +77,7 @@
 		path /eb-callback
 		vars_regexp {http.request.uri.query.state} ^fx-[0-9a-f]+$
 	}
-	# The importer fork's API is for Pico on the internal network only; it
+	# The importer fork's API is for Firefly Pocket on the internal network only; it
 	# answers here too, so refuse it outright (it is also token-guarded).
 	@fireflyx_internal path /api/fireflyx/* /fireflyx/*
 

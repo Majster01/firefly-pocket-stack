@@ -1,7 +1,8 @@
 """Turn a model classification into contract-valid suggestions.
 
-Everything the contract promises Pico about triggers is enforced here, after the
-model, so a bad answer can only lose a trigger — never write one that breaks a rule:
+Everything the contract promises Firefly Pocket about triggers is enforced
+here, after the model, so a bad answer can only lose a trigger — never write
+one that breaks a rule:
 
 - the category exists;
 - `(unknown destination)` and private people never become destination triggers;
@@ -80,7 +81,7 @@ def firefly_search(ff: Firefly) -> SearchFn:
 def preview_problem(search: SearchFn, query: str, group: TxnGroup, category: str, same_counterparty: bool) -> str | None:
     """Why a trigger is too generic, judged by what it would match today, or None.
 
-    Pico runs the Categorization group over all time on approval, so every
+    Firefly Pocket backfills over all time on approval, so every
     transaction the trigger matches — any type, any date — gets this category
     unless it already has one. A trigger is generic when it also matches:
       - transactions already in a different category (it would fight that rule), or

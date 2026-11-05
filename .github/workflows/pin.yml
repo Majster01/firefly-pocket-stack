@@ -6,9 +6,6 @@
 #   Majster01/firefly-pocket   main      ->  next      sha-<commit>
 #   Majster01/data-importer    fireflyx  ->  importer  <upstream version>-<commit>
 #
-# Pico's repository, Majster01/firefly-pocket-archive, is archived: pin `pico`
-# only by hand, to a tag it built before.
-#
 # Run it by hand (Actions -> Pin fork image -> Run workflow) to roll back to
 # an earlier tag; the "Bump ..." commits in master list them.
 name: Pin fork image
@@ -20,9 +17,9 @@ on:
       component:
         description: Service to move
         type: choice
-        options: [pico, next, importer]
+        options: [next, importer]
       tag:
-        description: Image tag in GHCR (sha-abc1234 for Pico and Next, 2.3.5-abc1234 for the importer)
+        description: Image tag in GHCR (sha-abc1234 for Next, 2.3.5-abc1234 for the importer)
         type: string
         required: true
 

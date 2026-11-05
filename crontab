@@ -38,8 +38,8 @@ LOCK="flock -w 7200 /run/lock/fireflyx.lock"
 # the import runs long.
 0 3 * * * $LOCK /opt/fireflyx/scripts/nightly.sh >> /var/log/fireflyx/nightly.log 2>&1
 
-# 19:00 every day — the category suggestions digest: one push to the Pico app if
-# suggestions are waiting for review. Nothing is sent when there are none. Each
+# 19:00 every day — the category suggestions digest: one push to the Firefly Pocket
+# app if suggestions are waiting for review. Nothing is sent when there are none. Each
 # device chooses in Pocket's settings whether it gets it daily, weekly (and on
 # which weekday) or never, so this runs daily and Pocket does the rest.
 0 19 * * * $LOCK /opt/fireflyx/scripts/notify-suggestions.sh >> /var/log/fireflyx/suggestions.log 2>&1

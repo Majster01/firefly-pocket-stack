@@ -17,7 +17,6 @@ output "dns_records_required" {
   description = "DNS must resolve BEFORE first compose start, or Caddy cannot get certificates."
   value = {
     firefly = "A  firefly.<your-domain>  -> ${hcloud_server.fireflyx.ipv4_address}"
-    pico    = "A  pico.<your-domain>     -> ${hcloud_server.fireflyx.ipv4_address}"
     next    = "A  next.<your-domain>     -> ${hcloud_server.fireflyx.ipv4_address}"
     import  = "A  import.<your-domain>   -> ${hcloud_server.fireflyx.ipv4_address}"
   }

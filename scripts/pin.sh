@@ -5,7 +5,6 @@
 # .github/workflows/pin.yml runs it when the fork's CI has pushed an image. By
 # hand it is a rollback (then push):
 #
-#     scripts/pin.sh pico sha-abc1234          # ghcr.io/majster01/firefly-pocket
 #     scripts/pin.sh next sha-abc1234          # ghcr.io/majster01/firefly-pocket-next
 #     scripts/pin.sh importer 2.3.5-abc1234    # ghcr.io/majster01/data-importer
 #
@@ -18,10 +17,9 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 COMPOSE_FILE="$REPO_ROOT/compose/docker-compose.yml"
 
 case "${1:-}" in
-  pico)     name=Pico     image=ghcr.io/majster01/firefly-pocket      source=Majster01/firefly-pocket-archive ;;
   next)     name=Next     image=ghcr.io/majster01/firefly-pocket-next source=Majster01/firefly-pocket ;;
   importer) name=importer image=ghcr.io/majster01/data-importer      source=Majster01/data-importer ;;
-  *) echo "usage: $0 pico|next|importer <tag>" >&2; exit 2 ;;
+  *) echo "usage: $0 next|importer <tag>" >&2; exit 2 ;;
 esac
 tag="${2:-}"
 if ! [[ "$tag" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]]; then

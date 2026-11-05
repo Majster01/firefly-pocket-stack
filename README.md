@@ -5,10 +5,9 @@ Self-hosted [Firefly III](https://docs.firefly-iii.org/) personal finance stack 
 | Service | What it is | URL |
 |---|---|---|
 | **Firefly III** | The finance app. Source of truth. | `https://firefly.<domain>` |
-| **Firefly Pico** | Mobile-optimised companion UI. | `https://pico.<domain>` |
-| **Firefly Pocket** | The redesign of Pico ([firefly-pocket](https://github.com/Majster01/firefly-pocket)): web app + API in one image, its own database. | `https://next.<domain>` |
+| **Firefly Pocket** | The mobile web app ([firefly-pocket](https://github.com/Majster01/firefly-pocket)): web app + API in one image, its own database. | `https://next.<domain>` |
 | **Data Importer** | Pulls transactions from your bank via Enable Banking. | `https://import.<domain>` |
-| **Category suggester** | Suggests category rules for you to approve in Pico. Nightly one-shot job, plus a trigger only the importer can call. | *not exposed* |
+| **Category suggester** | Suggests category rules for you to approve in Firefly Pocket. Nightly one-shot job, plus a trigger only the importer can call. | *not exposed* |
 
 Everything except Firefly III itself is an **API client** using a Personal Access Token — nothing else touches the Firefly database. That is why these compose so freely, and why adding or removing a companion app is low-risk.
 
@@ -16,11 +15,11 @@ Everything except Firefly III itself is an **API client** using a Personal Acces
 
 ## Design notes worth knowing
 
-**The category suggester is never exposed.** Its nightly run is a one-shot job. The one other way to start it is the `suggester-trigger` service, which "Import now" in Pico uses: it has no published port and no Caddy route, listens on the internal network only, and does nothing without `SUGGESTER_TRIGGER_TOKEN`, which only the importer holds. So nothing on the internet can drive its LLM spend. It only writes *inactive* rules; a category changes only when you approve a suggestion in Pico.
+**The category suggester is never exposed.** Its nightly run is a one-shot job. The one other way to start it is the `suggester-trigger` service, which "Import now" in Firefly Pocket uses: it has no published port and no Caddy route, listens on the internal network only, and does nothing without `SUGGESTER_TRIGGER_TOKEN`, which only the importer holds. So nothing on the internet can drive its LLM spend. It only writes *inactive* rules; a category changes only when you approve a suggestion in Firefly Pocket.
 
 **The importer *must* be public**, because the Enable Banking OAuth redirect lands in your browser over HTTPS. It has no login of its own, so Caddy guards it with basic auth. The nightly import trigger deliberately does **not** go through Caddy — cron calls the container directly on the internal network, so the lock never gets in automation's way.
 
-**Pico has no login of its own.** It is unlocked by a Firefly III Personal Access Token you paste into it. The browser keeps that token in local storage and sends it with every request; Pico's backend only asks Firefly III whether it is valid. Whoever holds the token has full access to Firefly III's API, which is public, and Firefly III's 2FA does not apply to tokens. So create **one token per device**, named after it, and a lost phone is revoked alone under Options → Profile → OAuth. Treat a phone with Pico on it like one with your banking app: screen lock on.
+**Firefly Pocket has no login of its own.** It is unlocked by a Firefly III Personal Access Token you paste into it. The browser keeps that token and sends it with every request; Firefly Pocket's server keeps no accounts and passes it on to Firefly III, which decides. Whoever holds the token has full access to Firefly III's API, which is public, and Firefly III's 2FA does not apply to tokens. So create **one token per device**, named after it, and a lost phone is revoked alone under Options → Profile → OAuth. Treat a phone with Firefly Pocket on it like one with your banking app: screen lock on, and Firefly Pocket's own passkey lock (Settings → Security) if others use the phone.
 
 **The log viewer is never exposed.** Through the Docker socket proxy, Dozzle can read every container's environment (every secret) and files, so it has no Caddy route and listens on the host's loopback only. The way in is an SSH tunnel; see [Logs](#logs-dozzle).
 
@@ -64,7 +63,6 @@ Lock `ssh_source_ips` to your own address if it is static — it is the single h
 
 ```
 firefly.<domain>   ->  <ip>
-pico.<domain>      ->  <ip>
 next.<domain>      ->  <ip>
 import.<domain>    ->  <ip>
 legal.<domain>     ->  <ip>
@@ -107,7 +105,7 @@ Then in a browser:
 
 1. Open `https://firefly.<domain>` and **register your account**. Do this promptly — until the first account exists, anyone who finds the host can claim it.
 2. Confirm registration closed itself: `https://firefly.<domain>/register` should now read **"Registration is currently not available"** with no form. It still returns HTTP 200, so judge by the page content, not the status code.
-3. Options → Profile → OAuth → **Personal Access Tokens** → create separate tokens for the importer, the suggester and **each device** you will use Pico on (named after the device), so any one can be revoked alone.
+3. Options → Profile → OAuth → **Personal Access Tokens** → create separate tokens for the importer, the suggester and **each device** you will use Firefly Pocket on (named after the device), so any one can be revoked alone.
 4. Options → Profile → **Enable two-factor authentication** for the web login. If two people share this account (Firefly III allows only one), both add the same TOTP secret to their authenticator app.
 
 > There is no registration flag to set. Firefly III 6.x has no `ALLOW_REGISTRATION` option — `single_user_mode` lives in the database, defaults to true, and `allowedToRegister()` refuses as soon as one user exists. Verified against 6.6.6 by registering and then failing to register again.
@@ -122,13 +120,13 @@ SUGGESTER_FIREFLY_TOKEN=...
 ANTHROPIC_API_KEY=...
 ```
 
-(Pico's token is not set here — you paste it into Pico's own UI.)
+(Firefly Pocket's token is not set here — you paste it into Firefly Pocket itself.)
 
 ```bash
 docker compose up -d
 ```
 
-Then open `https://pico.<domain>`, log in, and under **Settings → Setup** paste the Pico token. Add it to your phone's home screen — this is the URL you will actually use day to day.
+Then open `https://next.<domain>` and paste that device's token when it asks. Add it to your phone's home screen — this is the URL you will actually use day to day.
 
 ## 6. Connect your bank
 
@@ -151,21 +149,21 @@ Then open `https://pico.<domain>`, log in, and under **Settings → Setup** past
 
 ### Adding another bank account
 
-In Pico: **Extras → Bank connections → New**. Pick the country and bank, give consent at the bank, and Pico brings you to a page where each bank account is mapped to a Firefly III asset account (matched by IBAN when one already exists, or created for you) with an optional *Import history since* date (at most 90 days back, which is all banks usually share). **Save** and the next nightly run imports it — no compose, cron or script changes, and the import report fails loudly if it did not. A connection you leave half-way stays under *Bank connections* as **Needs mapping** with a *Set up accounts* button.
+In Firefly Pocket: **Bank connections → Connect a bank**. Pick the country and bank, give consent at the bank, and Firefly Pocket brings you to a page where each bank account is mapped to a Firefly III asset account (matched by IBAN when one already exists, or created for you) with an optional *Import history since* date (at most 90 days back, which is all banks usually share). **Save** and the next nightly run imports it — no compose, cron or script changes, and the import report fails loudly if it did not. A connection you leave half-way stays under *Bank connections* as **Needs mapping** with a *Set up accounts* button.
 
 ### Importing by hand ("Import now")
 
-On a connection's card in Pico, **Import** opens a time frame (default: the last 30 days) and starts an import of that connection at once. Nothing else is configurable: it uses the same settings as the nightly import (`config/importer-base.json`, the connection's session and its account mapping), with only the dates replaced. When the import finishes cleanly, the category suggester runs over **the same time frame** and the card shows what it made, with a link to review it. An import that reports errors stops there and says why; the suggester is not run.
+On a connection's card in Firefly Pocket, **Import now** opens a time frame (default: the last 30 days) and starts an import of that connection at once. Nothing else is configurable: it uses the same settings as the nightly import (`config/importer-base.json`, the connection's session and its account mapping), with only the dates replaced. When the import finishes cleanly, the category suggester runs over **the same time frame** and the card shows what it made, with a link to review it. An import that reports errors stops there and says why; the suggester is not run.
 
-It runs on the server, so you can close Pico meanwhile. Only one manual import runs at a time, and it does not count as the night's import (the nightly report is unaffected). Overlap with what is already imported is harmless: duplicates are matched by `external_id`.
+It runs on the server, so you can close Firefly Pocket meanwhile. Only one manual import runs at a time, and it does not count as the night's import (the nightly report is unaffected). Overlap with what is already imported is harmless: duplicates are matched by `external_id`.
 
 **Banks limit unattended requests** (PSD2 allows about four a day per account when you are not present at the bank), and the nightly run uses one, so keep manual imports for when you need them.
 
-Steps 5–7 above (the importer UI plus `fireflyx:connections:adopt`) still work and are the fallback when Pico is not reachable. Pico lists, re-authorises and removes connections too; the design is in `docs/design/bank-link.md`.
+Steps 5–7 above (the importer UI plus `fireflyx:connections:adopt`) still work and are the fallback when Firefly Pocket is not reachable. Firefly Pocket lists, renews and removes connections too; the design is in `docs/design/bank-link.md`.
 
 One `/autoimport` call imports every rendered `*.json`: the importer's `AutoImports::getFiles()` scans the directory and treats each config as its own job, each inside its own `try/catch`, so an expired consent on one bank does not stop the others.
 
-## 7. Category suggestions (review in Pico)
+## 7. Category suggestions (review in Firefly Pocket)
 
 The **category-suggester** (`services/category-suggester`, compose service `suggester`) is the reviewed alternative to letting an LLM set categories directly. For uncategorized withdrawals it asks Claude — with web search for merchants it does not recognise — which category fits and which rule trigger would catch the merchant next time, then writes that as an **inactive** rule into the `Suggestions` rule group. Firefly Pocket lists them; approving one moves its triggers into `Category: {category}` in `Categorization`. Nothing is categorized until you approve.
 
@@ -181,11 +179,11 @@ docker compose run --rm suggester notify              # one push to the Firefly 
 docker compose run --rm suggester notify --dry-run    # print what it would send, send nothing
 ```
 
-The same suggester also runs after a manual import (**Import** in Pico, see [Importing by hand](#importing-by-hand-import-now)), limited to the time frame that was imported: the importer calls the `suggester-trigger` service, which runs `suggest --since … --until …`. A run lock in the `suggester_data` volume keeps it and the nightly job from overlapping. Existing servers need the new token once: `./scripts/gen-secrets.sh`, then `scripts/deploy.sh --force` (which starts `suggester-trigger`).
+The same suggester also runs after a manual import (**Import now** in Firefly Pocket, see [Importing by hand](#importing-by-hand-import-now)), limited to the time frame that was imported: the importer calls the `suggester-trigger` service, which runs `suggest --since … --until …`. A run lock in the `suggester_data` volume keeps it and the nightly job from overlapping. Existing servers need the new token once: `./scripts/gen-secrets.sh`, then `scripts/deploy.sh --force` (which starts `suggester-trigger`).
 
-Suggestions you reject in Pico are remembered (SQLite in the `suggester_data` volume) and never made again. Low-confidence guesses (below `SUGGESTER_MIN_CONFIDENCE`) are still suggested, but only with the exact transaction description as trigger.
+Suggestions you reject in Firefly Pocket are remembered (SQLite in the `suggester_data` volume) and never made again. Low-confidence guesses (below `SUGGESTER_MIN_CONFIDENCE`) are still suggested, but only with the exact transaction description as trigger.
 
-Categorization rules live **only in Firefly** (the `Categorization` group). Change them there or by approving suggestions in Pico; there is no seed file to keep in sync.
+Categorization rules live **only in Firefly** (the `Categorization` group). Change them there or by approving suggestions in Firefly Pocket; there is no seed file to keep in sync.
 
 ## 8. Schedule everything
 
@@ -263,7 +261,7 @@ Work through these in order — each gates the next.
 - [ ] Register, then `docker compose restart app`, and confirm your account survives
 - [ ] `/register` shows "Registration is currently not available" (returns 200 — check the page, not the status)
 - [ ] Attach a receipt to a transaction, `docker compose up -d --force-recreate app`, confirm it still downloads
-- [ ] Pico works **on your actual phone**; a transaction created there appears in Firefly III
+- [ ] Firefly Pocket works **on your actual phone**; a transaction created there appears in Firefly III
 - [ ] `https://import.<domain>` prompts for basic auth from outside
 - [ ] `https://logs.<domain>` does not answer at all, and Dozzle opens through the SSH tunnel ([Logs](#logs-dozzle))
 - [ ] `docker compose exec importer php artisan fireflyx:render` writes one `<name>.json` per connection, all sharing a `date_not_before` of today minus `IMPORT_LOOKBACK_DAYS`, and `docker compose exec importer ls -l /import` shows them all
@@ -272,7 +270,7 @@ Work through these in order — each gates the next.
 - [ ] **Run it a second time and confirm it imports nothing** — this proves duplicate detection, the single most likely thing to be misconfigured. It must still exit 0: if the "bank import error check" step trips on the re-fetched overlap, `IGNORE_DUPLICATE_ERRORS` is not set
 - [ ] Drop `&directory=/import` from the autoimport URL in `nightly.sh` and confirm the step now *fails* with "Not allowed to import from this path" — then put it back. This proves the log check and the allowlist are both live
 - [ ] `docker compose run --rm suggester suggest --dry-run` prints sensible rules for your uncategorized withdrawals and writes nothing
-- [ ] After a real run, the suggestions show up in Pico; approve one and confirm only uncategorized transactions changed
+- [ ] After a real run, the suggestions show up in Firefly Pocket; approve one and confirm only uncategorized transactions changed
 - [ ] Create a recurring transaction dated tomorrow, run the cron step, confirm it fires
 - [ ] Break the importer token deliberately and confirm you actually receive the alert
 - [ ] `./scripts/backup.sh && ./scripts/restore-test.sh` passes — **do this now**, while there is nothing to lose
@@ -283,7 +281,7 @@ Work through these in order — each gates the next.
 
 ### Re-authorising the bank (every 90–180 days)
 
-PSD2 consent expires. The nightly consent check alerts 14, 7 and 3 days ahead. In Pico, open **Extras → Bank connections** and tap **Re-authenticate** on the bank; the next import uses the new consent. If the bank returns different accounts than before, Pico says so and changes nothing, and you re-link in the importer UI instead: open `https://import.<domain>`, run the Enable Banking flow for that bank, download the config, then replace the connection's session and account IDs in one go (they belong together; the old ones die with the old session):
+PSD2 consent expires. The nightly consent check alerts 14, 7 and 3 days ahead. In Firefly Pocket, open **Bank connections** and tap **Renew consent** on the bank; the next import uses the new consent. If the bank returns different accounts than before, the importer changes nothing (Firefly Pocket only says the consent was not confirmed), and you re-link in the importer UI instead: open `https://import.<domain>`, run the Enable Banking flow for that bank, download the config, then replace the connection's session and account IDs in one go (they belong together; the old ones die with the old session):
 
 ```bash
 scp nlb.json <server>:/tmp/nlb.json
@@ -294,11 +292,11 @@ If the export uses `classic` duplicate detection, the command refuses it as diff
 
 ### Debugging a bank link
 
-When a consent finishes at the bank but Pico does not get the account back (`reason=no_accounts`, `bank_declined`, `session_failed`), turn the consent trace on for the importer, repeat the link once, and read what Enable Banking and the bank actually said:
+When a consent finishes at the bank but Firefly Pocket does not get the account back (`reason=no_accounts`, `bank_declined`, `session_failed`), turn the consent trace on for the importer, repeat the link once, and read what Enable Banking and the bank actually said:
 
 ```bash
 ssh <server> "cd /opt/fireflyx/compose && sed -i 's/^FIREFLYX_EB_TRACE=.*/FIREFLYX_EB_TRACE=true/' .env && docker compose up -d importer"
-# link the bank in Pico, then:
+# link the bank in Firefly Pocket, then:
 ssh <server> "cd /opt/fireflyx/compose && docker compose logs --since 30m importer | grep -E 'EB-TRACE|FireflyX:'"
 ```
 
@@ -345,7 +343,7 @@ Moving an existing server off the old `logs.<domain>` site: deploying `master` d
 
 ### Bank connections (importer fork)
 
-The importer is built from our fork, [Majster01/data-importer](https://github.com/Majster01/data-importer) (branch `fireflyx`): the official image plus bank connections stored in its own `fireflyx_importer` database (sessions encrypted with `IMPORTER_APP_KEY`), a token-guarded API for Pico, and the artisan commands the nightly run uses. The design, and why it is a fork, is in `docs/design/bank-link.md`.
+The importer is built from our fork, [Majster01/data-importer](https://github.com/Majster01/data-importer) (branch `fireflyx`): the official image plus bank connections stored in its own `fireflyx_importer` database (sessions encrypted with `IMPORTER_APP_KEY`), a token-guarded API for Firefly Pocket, and the artisan commands the nightly run uses. The design, and why it is a fork, is in `docs/design/bank-link.md`.
 
 Every connection imports with the same settings: the committed `config/importer-base.json`. A connection holds only its bank, its Enable Banking session and which bank account feeds which Firefly III account. Before each import, `fireflyx:render` writes base + connection + date window into `/import` (the `importer_render` volume) and removes the files of connections that are gone, expired or unmapped. To change an import setting for every bank, edit `config/importer-base.json` and merge it into `master`; the next nightly run uses it. The render refuses a base that sets per-connection or date keys, or anything but `cell`/`external-id` duplicate detection.
 
@@ -375,7 +373,7 @@ cd .. && ./scripts/nightly.sh          # the import report must show nlb as ok
 
 The old `compose/importer/` directory is no longer mounted and can be deleted once the first nightly run on the fork has passed. Keep `config/importers/` until then, too.
 
-### Status page in Pico (Extras → System status)
+### Status page in Firefly Pocket (System status)
 
 One screen on the phone answers "did last night work, and what is the suggester doing?" without ssh. It shows, for the last 7, 30 or 90 days:
 
@@ -384,7 +382,7 @@ One screen on the phone answers "did last night work, and what is the suggester 
 - **Bank connection activity**: what happened to the connections, newest first. Consent started, **declined by the bank** (with what the bank said), session failed, **no accounts shared**, accounts did not match on a re-link, accounts mapped, removed, and from the nightly check: status check failed (once, not every hour), works again, **consent ended**. This is where a failed link to a **new** bank stays visible, although that connection is deleted when the consent fails. No IBAN, name, session id or authorisation code is ever stored, only the step, a short reason and a bounded message.
 - **Category suggester**: runs, **AI calls** (model API requests, which can exceed the number of groups when a web search pauses a turn), how many suggestions fell **below the confidence threshold**, web searches, tokens in and out, errors, and what became of the suggestions (waiting, approved or categorized by hand, rejected). A run with errors lists what the first few said (the model refused, a rule could not be written).
 
-Where it comes from: the importer records one `fireflyx_import_runs` row per connection per nightly import (kept `FIREFLYX_HISTORY_DAYS`, default 180) and the connection events in `fireflyx_connection_events` (kept `FIREFLYX_EVENTS_DAYS`, default 90), the suggester one `runs` row per real run in its SQLite file, and `GET /api/fireflyx/v1/status` on the importer joins them with the connections and fetches the suggester's `GET /stats` on the internal network. Pico only talks to the importer, so it needs no token for the suggester. **History starts the day each table is created** — earlier nights were not recorded, and the page says so. "Import now" runs are counted separately (they are not nightly imports), and a dry run leaves no suggester row.
+Where it comes from: the importer records one `fireflyx_import_runs` row per connection per nightly import (kept `FIREFLYX_HISTORY_DAYS`, default 180) and the connection events in `fireflyx_connection_events` (kept `FIREFLYX_EVENTS_DAYS`, default 90), the suggester one `runs` row per real run in its SQLite file, and `GET /api/fireflyx/v1/status` on the importer joins them with the connections and fetches the suggester's `GET /stats` on the internal network. Firefly Pocket only talks to the importer, so it needs no token for the suggester. **History starts the day each table is created** — earlier nights were not recorded, and the page says so. "Import now" runs are counted separately (they are not nightly imports), and a dry run leaves no suggester row.
 
 Upgrading an existing server: merge the three branches in this order, each merge being its deploy, because each side tolerates the other being old — this repository's `master` (suggester image and `suggester-trigger`), then the importer fork's `fireflyx` (its migration runs on start), then firefly-pocket's `main`. With an old suggester the page shows the suggester card as unavailable with the reason; with an old importer the page reports that it cannot load the status.
 
@@ -413,7 +411,7 @@ The server pulls; nothing logs into it to deploy. `/opt/fireflyx` is a git check
 3. if Firefly III's, Postgres' or the importer's image is changing: backs up, and proves the backup restores. They migrate a database on start;
 4. runs `docker compose up -d --remove-orphans`, which restarts only services whose image or settings changed (and Caddy when the Caddyfile changed);
 5. installs `crontab`;
-6. checks that Firefly III, the importer, Pico and Firefly Pocket (`/` and `/api/test`) answer and that every service runs.
+6. checks that Firefly III, the importer and Firefly Pocket (`/` and `/api/test`) answer and that every service runs.
 
 A failure arrives as a push (ntfy and the Firefly Pocket app): `Firefly Pocket: deploy abc1234: <step> FAILED` with the step's output. A success says something only when it upgraded a package: "Upgrade successful" in the Firefly Pocket app. A revision that failed is not tried again until `master` moves; `scripts/deploy.sh --force` on the server retries it. Untracked files (`compose/.env`, `compose/secrets/`, `config/importers/`) are never touched.
 
@@ -421,7 +419,6 @@ The deploy and the cron jobs share one lock, `/run/lock/fireflyx.lock`: a deploy
 
 | What changed | How it gets to the server | Restarts |
 |---|---|---|
-| Firefly Pico | archived: [firefly-pocket-archive](https://github.com/Majster01/firefly-pocket-archive) builds no more images; pin an existing tag by hand | `pico` |
 | Firefly Pocket | merge into `main` of [firefly-pocket](https://github.com/Majster01/firefly-pocket) | `next` |
 | The importer fork | merge into `fireflyx` of [data-importer](https://github.com/Majster01/data-importer) | `importer`, after a backup and restore test |
 | Firefly III, Postgres, Caddy, Dozzle, the socket proxy, the images the scripts use | Renovate opens a PR on Monday mornings; merge it | that service; Firefly III and Postgres after a backup and restore test |
@@ -432,31 +429,13 @@ Rules:
 
 - **Never edit tracked files on the server.** The deploy refuses to run over them and alerts. Put the change into `master`.
 - **A new secret or `.env` value goes onto the server before the merge** (`./scripts/gen-secrets.sh`, or by hand). Without it the deploy stops at `docker compose` with the `:?` message, and nothing restarts.
-- **Features across repositories**: merge the side the others call first, usually this repository, then the importer, then Pico and Firefly Pocket. Each tolerates the others being older.
+- **Features across repositories**: merge the side the others call first, usually this repository, then the importer, then Firefly Pocket. Each tolerates the others being older.
 - **Roll back a fork**: Actions → *Pin fork image* → *Run workflow* with the service and an earlier tag (the `Bump …` commits in `master` list them). Anything else: revert the commit in `master`. Rolling back an image that has migrated a database also needs that database restored ([Restoring](#restoring)).
 - **What runs now**: `cat /opt/fireflyx/.deployed-rev`; the log is `journalctl -u fireflyx-deploy`.
 
 Optional: with `DEPLOY_STATUS_TOKEN` in `.env` (a fine-grained token for this repository only, *Commit statuses: Read and write*), every commit in GitHub shows a `deploy/server` status: pending, success or failure.
 
-#### Adding Firefly Pocket (once, on an existing server)
-
-[Firefly Pocket](https://github.com/Majster01/firefly-pocket) runs as the `next` service at `https://${NEXT_HOSTNAME}`, beside Pico, with its own database `firefly_next` (role `next`): it starts empty and shares nothing with Pico. This stack's alerts and notifications go to Firefly Pocket's push endpoint, not Pico's. In this order:
-
-1. **DNS**: an A record for `next.<domain>` pointing at the server, resolving before Caddy is recreated.
-2. **On the server, before merging this repository's change**, in `/opt/fireflyx`:
-   ```bash
-   ./scripts/gen-secrets.sh      # adds NEXT_APP_KEY, NEXT_DB_PASSWORD, NEXT_NOTIFY_TOKEN, and NEXT_HOSTNAME=next.<Pico's domain>
-   grep ^NEXT_HOSTNAME compose/.env
-   ./scripts/setup-next-db.sh    # creates firefly_next (initdb only runs on an empty volume)
-   ```
-   Without the new values the deploy stops at `docker compose` and restarts nothing.
-3. **Merge this repository's change.** `compose/docker-compose.yml` names the placeholder `ghcr.io/majster01/firefly-pocket-next:sha-0000000`, which does not exist, so this deploy and every one after it stop at "pull images", restarting nothing, until the first pin. Go straight on.
-4. **Merge firefly-pocket's PR into its `main`.** Its *Deploy* run builds and pushes the image, then starts *Pin fork image*, and that first pin fails: the new GHCR package is private.
-5. **Make the package public**: your GitHub profile → *Packages* → `firefly-pocket-next` → *Package settings* → *Change visibility* → *Public*. The repository stays private, but anyone can pull the image and read the server code and web bundle in it.
-6. **Re-run the failed *Pin fork image* run** (Actions → the failed run → *Re-run jobs*). It commits `Bump Next to <commit>`; within two minutes the server pulls the image, starts `next` (which migrates `firefly_next`), recreates Caddy for the new site and smoke-tests `http://next:80/api/test`.
-7. Open `https://next.<domain>` and paste a Firefly III Personal Access Token (one per device, as for Pico).
-
-Until step 6, the nightly backup skips `firefly_next` (an unmigrated database has nothing to keep) and the restore test notes it has no dump. Optional: `NEXT_WARMUP_FIREFLY_TOKEN` in `.env` (a separate Firefly token of your user) turns on Firefly Pocket's cache warm-up; then `scripts/deploy.sh --force`. Firefly III's webhooks stay off, so Firefly Pocket's cache learns about changes made outside it only from its own changes and its TTL.
+Optional: `NEXT_WARMUP_FIREFLY_TOKEN` in `.env` (a separate Firefly token of your user) turns on Firefly Pocket's cache warm-up; then `scripts/deploy.sh --force`. Firefly III's webhooks stay off, so Firefly Pocket's cache learns about changes made outside it only from its own changes and its TTL.
 
 #### Setting it up on an existing server (once)
 
@@ -499,11 +478,11 @@ Check it took effect: `ssh <server> 'sudo unattended-upgrade --dry-run --debug 2
 ### Restoring
 
 ```bash
-docker compose stop app pico next
+docker compose stop app next
 docker compose exec -T db psql -U postgres -c 'DROP DATABASE firefly;'
 docker compose exec -T db psql -U postgres -c 'CREATE DATABASE firefly OWNER firefly;'
 docker compose exec -T db pg_restore -U postgres -d firefly --no-owner < /var/backups/fireflyx/firefly-<stamp>.dump
-docker compose start app pico next
+docker compose start app next
 ```
 
 Attachments restore from the matching `uploads-<stamp>.tar.gz` into the `fireflyx_firefly_upload` volume.
@@ -535,7 +514,6 @@ Rotating `NEXT_NOTIFY_TOKEN` also needs `docker compose up -d next`; the host sc
 | No category suggestions appear | It only looks at **uncategorized withdrawals** from the last 30 days; check `/var/log/fireflyx-nightly.log`, that `SUGGESTER_FIREFLY_TOKEN` and `ANTHROPIC_API_KEY` are set, and that the Anthropic account has credit |
 | `initdb` changes have no effect | It runs only against an empty `db_data` volume — apply by hand with psql |
 | Deploy alert "Tracked files were edited on the server" | Someone changed a file git tracks in `/opt/fireflyx`. Put the change into `master`, or `git checkout -- <file>` on the server, then `scripts/deploy.sh --force` |
-| Every deploy stops at "pull images" for `firefly-pocket-next:sha-0000000` | Firefly Pocket's first pin has not landed yet: make its GHCR package public and re-run *Pin fork image* ([Adding Firefly Pocket](#adding-firefly-pocket-once-on-an-existing-server)) |
 | A merge in a fork never shows up on the server | Find where it stopped: the fork's *Deploy* run (build, or an expired `FIREFLY_POCKET_DISPATCH_TOKEN`), then this repository's *Pin fork image* run ("cannot be pulled without a login": the GHCR package is private), then `journalctl -u fireflyx-deploy` on the server |
 
 ---

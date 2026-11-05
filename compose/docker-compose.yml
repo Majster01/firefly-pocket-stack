@@ -1,4 +1,4 @@
-# firefly-pocket-stack — Firefly III + Pico + Firefly Pocket + Data Importer + Category suggester
+# firefly-pocket-stack — Firefly III + Firefly Pocket + Data Importer + Category suggester
 #
 # Only `caddy` publishes ports. Everything else is reachable solely on the
 # internal `fireflyx` network — in particular Postgres and the category suggester
@@ -65,7 +65,6 @@ services:
     environment:
       ACME_EMAIL: ${ACME_EMAIL:?set ACME_EMAIL in .env}
       FIREFLY_HOSTNAME: ${FIREFLY_HOSTNAME:?set FIREFLY_HOSTNAME in .env}
-      PICO_HOSTNAME: ${PICO_HOSTNAME:?set PICO_HOSTNAME in .env}
       NEXT_HOSTNAME: ${NEXT_HOSTNAME:?set NEXT_HOSTNAME in .env}
       IMPORT_HOSTNAME: ${IMPORT_HOSTNAME:?set IMPORT_HOSTNAME in .env}
       LEGAL_HOSTNAME: ${LEGAL_HOSTNAME:?set LEGAL_HOSTNAME in .env}
@@ -87,7 +86,6 @@ services:
       ACME_CA: ${ACME_CA:-https://acme-v02.api.letsencrypt.org/directory}
     depends_on:
       - app
-      - pico
       - next
       - importer
 
@@ -109,7 +107,6 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_SUPER_PASSWORD:?run scripts/gen-secrets.sh}
       POSTGRES_DB: postgres
       FIREFLY_DB_PASSWORD: ${FIREFLY_DB_PASSWORD:?run scripts/gen-secrets.sh}
-      PICO_DB_PASSWORD: ${PICO_DB_PASSWORD:?run scripts/gen-secrets.sh}
       IMPORTER_DB_PASSWORD: ${IMPORTER_DB_PASSWORD:?run scripts/gen-secrets.sh}
       NEXT_DB_PASSWORD: ${NEXT_DB_PASSWORD:?run scripts/gen-secrets.sh}
       TZ: ${TZ:-Etc/UTC}
@@ -179,55 +176,10 @@ services:
       db:
         condition: service_healthy
 
-  # ---------------------------------------------------------------- pico ---
-  # Mobile UI. Keeps its own state (icons, sub-tags, templates) in its own
-  # database. Listens on port 80, NOT 8080 — differs from every other service.
-  #
-  # Built by the Pico fork's CI (Majster01/firefly-pocket-archive, branch main)
-  # and tagged sha-<commit>. That repository is archived, so this tag moves only
-  # when pinned by hand.
-  pico:
-    image: ghcr.io/majster01/firefly-pocket:sha-3b4062e
-    container_name: fireflyx-pico
-    restart: unless-stopped
-    logging: *default-logging
-    networks: [fireflyx]
-    environment:
-      APP_KEY: ${PICO_APP_KEY:?run scripts/gen-secrets.sh}
-      APP_URL: https://${PICO_HOSTNAME}
-      # Browser-facing: Pico's frontend calls Firefly III from your phone,
-      # so this must be the public URL, not the internal container name.
-      FIREFLY_URL: https://${FIREFLY_HOSTNAME}
-      TZ: ${TZ:-Etc/UTC}
-      DB_CONNECTION: pgsql
-      DB_HOST: db
-      DB_PORT: "5432"
-      DB_DATABASE: firefly_pico
-      DB_USERNAME: pico
-      DB_PASSWORD: ${PICO_DB_PASSWORD}
-      # Bank connections page: Pico's backend calls the importer fork on the
-      # internal network (Caddy refuses this API from outside).
-      IMPORTER_API_URL: http://importer:8080/api/fireflyx/v1
-      IMPORTER_API_TOKEN: ${FIREFLYX_API_TOKEN:?run scripts/gen-secrets.sh}
-      # Web Push for the installed PWA. This stack's alert senders (scripts/lib.sh
-      # notify(), the category suggester) POST to /api/internal/notify on this
-      # network with NOTIFY_API_TOKEN; Caddy refuses that path from outside.
-      # Pico builds that predate the receiver ignore all four. Without the VAPID
-      # keys the endpoint answers 503 and the senders fall back to ntfy alone.
-      # Generate them with scripts/gen-secrets.sh (see README "Push alerts").
-      NOTIFY_API_TOKEN: ${PICO_NOTIFY_TOKEN:?run scripts/gen-secrets.sh}
-      VAPID_PUBLIC_KEY: ${VAPID_PUBLIC_KEY:-}
-      VAPID_PRIVATE_KEY: ${VAPID_PRIVATE_KEY:-}
-      VAPID_SUBJECT: ${VAPID_SUBJECT:-}
-    depends_on:
-      db:
-        condition: service_healthy
-
   # ---------------------------------------------------------------- next ---
-  # Firefly Pocket, the redesign of Pico: the web app and its API in one image
-  # (nginx + php-fpm, a bundled redis for its queue and cache), on port 80 like
-  # Pico. Its own database, firefly_next, owned by its own role: it starts empty
-  # and none of Pico's data is shared. Migrations run on start.
+  # Firefly Pocket: the web app and its API in one image (nginx + php-fpm, a
+  # bundled redis for its queue and cache), on port 80, NOT 8080. Its own
+  # database, firefly_next, owned by its own role. Migrations run on start.
   #
   # Built by Majster01/firefly-pocket's CI (branch main) and tagged
   # sha-<commit>. A merge into its main pins the new tag here through
@@ -243,7 +195,7 @@ services:
     environment:
       APP_KEY: ${NEXT_APP_KEY:?run scripts/gen-secrets.sh}
       APP_URL: https://${NEXT_HOSTNAME:?set NEXT_HOSTNAME in .env}
-      # The public Firefly III URL, as for Pico.
+      # The public Firefly III URL, not the internal container name.
       FIREFLY_URL: https://${FIREFLY_HOSTNAME}
       # Also the timezone the cache of Firefly answers expires at midnight in.
       TZ: ${TZ:-Etc/UTC}
@@ -253,14 +205,14 @@ services:
       DB_DATABASE: firefly_next
       DB_USERNAME: next
       DB_PASSWORD: ${NEXT_DB_PASSWORD:?run scripts/gen-secrets.sh}
-      # Bank connections: the same internal importer API Pico uses (Caddy
-      # refuses it from outside).
+      # Bank connections: the importer fork's internal API (Caddy refuses it
+      # from outside).
       IMPORTER_API_URL: http://importer:8080/api/fireflyx/v1
       IMPORTER_API_TOKEN: ${FIREFLYX_API_TOKEN:?run scripts/gen-secrets.sh}
-      # Web Push for the installed PWA, with the same VAPID keypair as Pico (a
-      # subscription belongs to one origin, so they never mix). The receiver,
-      # POST /api/internal/notify, has its own token; this stack's alert senders
-      # call this one. Caddy refuses /api/internal/* from outside.
+      # Web Push for the installed PWA. The receiver, POST /api/internal/notify,
+      # has its own token, which this stack's alert senders use. Without the
+      # VAPID keys it answers 503 and the senders fall back to ntfy alone
+      # (README "Push alerts"). Caddy refuses /api/internal/* from outside.
       NOTIFY_API_TOKEN: ${NEXT_NOTIFY_TOKEN:?run scripts/gen-secrets.sh}
       VAPID_PUBLIC_KEY: ${VAPID_PUBLIC_KEY:-}
       VAPID_PRIVATE_KEY: ${VAPID_PRIVATE_KEY:-}
@@ -282,7 +234,7 @@ services:
   importer:
     # Our fork (Majster01/data-importer, branch fireflyx): the official
     # image plus bank connections in Postgres, the nightly render and the API
-    # Pico uses. See docs/design/bank-link.md. Built by the fork's CI and
+    # Firefly Pocket uses. See docs/design/bank-link.md. Built by the fork's CI and
     # tagged <upstream version>-<commit>; a merge into its fireflyx branch pins
     # the new tag here through .github/workflows/pin.yml, which deploys it
     # (after a backup and restore test, as for every image that migrates).
@@ -363,7 +315,7 @@ services:
       AUTORUN_LARAVEL_EVENT_CACHE: "false"
       AUTORUN_LARAVEL_STORAGE_LINK: "false"
       FIREFLYX_API_TOKEN: ${FIREFLYX_API_TOKEN:?run scripts/gen-secrets.sh}
-      # "Import now" from Pico asks the category suggester to look at the time
+      # "Import now" in Firefly Pocket asks the category suggester to look at the time
       # frame it just imported (see suggester-trigger).
       FIREFLYX_SUGGESTER_URL: http://suggester-trigger:8080
       FIREFLYX_SUGGESTER_TOKEN: ${SUGGESTER_TRIGGER_TOKEN:?run scripts/gen-secrets.sh}
@@ -379,7 +331,7 @@ services:
       FIREFLYX_PICO_URL: https://${NEXT_HOSTNAME}
       # Banks book late; duplicate detection discards the overlap.
       FIREFLYX_LOOKBACK_DAYS: ${IMPORT_LOOKBACK_DAYS:-5}
-      # Per-night import history for Pico's System status page (see README).
+      # Per-night import history for Firefly Pocket's System status page (README).
       FIREFLYX_HISTORY_DAYS: ${FIREFLYX_HISTORY_DAYS:-180}
       FIREFLYX_EVENTS_DAYS: ${FIREFLYX_EVENTS_DAYS:-90}
       # Consent-flow trace for debugging a bank link: one "EB-TRACE" log line
@@ -427,7 +379,6 @@ services:
       # `notify`: the suggestions digest, linking to Firefly Pocket's suggestion list.
       # Goes to its Web Push endpoint on this network, for the devices that want it.
       NTFY_URL: ${NTFY_URL}
-      PICO_URL: https://${PICO_HOSTNAME}
       NEXT_NOTIFY_URL: http://next:80/api/internal/notify
       NEXT_NOTIFY_TOKEN: ${NEXT_NOTIFY_TOKEN:?run scripts/gen-secrets.sh}
       TZ: ${TZ:-Etc/UTC}
@@ -436,7 +387,7 @@ services:
 
   # ------------------------------------------------- suggester-trigger ---
   # The same image, kept running so the importer can ask for a run: a manual
-  # import started from Pico ("Import now") is followed by suggestions for the
+  # import started from Firefly Pocket ("Import now") is followed by suggestions for the
   # time frame it imported. It listens on this network only (no published port,
   # no Caddy route) and does nothing without SUGGESTER_TRIGGER_TOKEN, which
   # only the importer holds. It runs the same `suggest` as the nightly job.

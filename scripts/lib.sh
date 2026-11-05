@@ -176,7 +176,6 @@ package_label() {
     app) echo "Firefly III" ;;
     db) echo "Postgres" ;;
     caddy) echo "Caddy" ;;
-    pico) echo "Firefly Pico" ;;
     next) echo "Firefly Pocket" ;;
     importer) echo "Data importer" ;;
     dozzle) echo "Dozzle" ;;

@@ -2,8 +2,8 @@
 #
 # Proves the backups are restorable, without touching the live stack.
 #
-# Restores the most recent dump of every database (Firefly III, Pico and the
-# importer's bank connections) into a throwaway Postgres container and checks
+# Restores the most recent dump of every database (Firefly III, Firefly Pocket
+# and the importer's bank connections) into a throwaway Postgres container and checks
 # their tables, lists the attachments archive end to end, compares row counts
 # with the fingerprint taken at backup time, and checks that the .env copy
 # holds IMPORTER_APP_KEY, without which the bank sessions in the
@@ -78,8 +78,8 @@ FAILED=0
 #
 # Restores the newest dump of <database> into a database of the same name.
 # Every required table must exist and have rows. The other tables are printed
-# for a look but may be empty: Pico can have no templates and the importer no
-# bank connection, and that is not a broken backup. For those two the
+# for a look but may be empty: Firefly Pocket can have no templates and the
+# importer no bank connection, and that is not a broken backup. For those the
 # `migrations` table is what proves the schema came back.
 check_dump() {
   local db="$1" required="$2" others="$3" dump count table
@@ -126,7 +126,13 @@ check_dump() {
 
 echo "==> testing the ${WHERE} backup in ${SOURCE_DIR}"
 check_dump firefly "users accounts transaction_journals" ""
-check_dump firefly_pico "migrations" "profiles transaction_templates push_subscriptions"
+# Pico's database, in the backups taken before Retire Pico step 6 dropped it.
+# Only a dump from this same backup counts: an older one left beside it would
+# not match the fingerprint.
+STAMP_OF_DUMP="$(basename "$(newest 'firefly-*.dump')" .dump)"
+if [ -f "$SOURCE_DIR/firefly_pico-${STAMP_OF_DUMP#firefly-}.dump" ]; then
+  check_dump firefly_pico "migrations" "profiles transaction_templates push_subscriptions"
+fi
 check_dump fireflyx_importer "migrations" "fireflyx_connections fireflyx_connection_accounts fireflyx_import_runs"
 # The backup leaves Firefly Pocket's database out until it has been migrated.
 if [ -n "$(newest 'firefly_next-*.dump')" ]; then
@@ -151,7 +157,6 @@ fi
 # must hold the same rows and attachment files. The one with the same stamp as
 # the Firefly III dump, so a later run that failed half-way cannot be compared
 # with an older dump. Backups from before fingerprints existed have none.
-STAMP_OF_DUMP="$(basename "$(newest 'firefly-*.dump')" .dump)"
 RECORDED="$SOURCE_DIR/fingerprint-${STAMP_OF_DUMP#firefly-}.txt"
 if [ ! -f "$RECORDED" ]; then
   echo "    fingerprint: none for this backup (taken before fingerprints existed)"

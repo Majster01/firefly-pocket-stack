@@ -43,17 +43,14 @@ randstr() {
 value_for() {
   case "$1" in
     FIREFLY_APP_KEY)          randstr 32 ;;
-    PICO_APP_KEY)             randstr 32 ;;
     STATIC_CRON_TOKEN)        randstr 32 ;;
     AUTO_IMPORT_SECRET)       randstr 32 ;;
     POSTGRES_SUPER_PASSWORD)  randstr 32 ;;
     FIREFLY_DB_PASSWORD)      randstr 32 ;;
-    PICO_DB_PASSWORD)         randstr 32 ;;
     IMPORTER_DB_PASSWORD)     randstr 32 ;;
     IMPORTER_APP_KEY)         randstr 32 ;;
     FIREFLYX_API_TOKEN)       randstr 48 ;;
     SUGGESTER_TRIGGER_TOKEN)  randstr 48 ;;
-    PICO_NOTIFY_TOKEN)        randstr 48 ;;
     NEXT_APP_KEY)             randstr 32 ;;
     NEXT_DB_PASSWORD)         randstr 32 ;;
     NEXT_NOTIFY_TOKEN)        randstr 48 ;;
@@ -66,7 +63,7 @@ value_for() {
 # loop below only fills existing empty lines. Append the missing ones first, so
 # re-running this script on an existing server is all an upgrade needs.
 for key in IMPORTER_DB_PASSWORD IMPORTER_APP_KEY FIREFLYX_API_TOKEN SUGGESTER_TRIGGER_TOKEN \
-           PICO_NOTIFY_TOKEN VAPID_PUBLIC_KEY VAPID_PRIVATE_KEY \
+           VAPID_PUBLIC_KEY VAPID_PRIVATE_KEY \
            NEXT_APP_KEY NEXT_DB_PASSWORD NEXT_NOTIFY_TOKEN; do
   if ! grep -qE "^${key}=" "$ENV_FILE"; then
     printf '%s=\n' "$key" >> "$ENV_FILE"
@@ -77,19 +74,6 @@ done
 if ! grep -qE '^VAPID_SUBJECT=' "$ENV_FILE"; then
   owner="$(sed -n 's/^SITE_OWNER=//p' "$ENV_FILE" | head -n 1)"
   printf 'VAPID_SUBJECT=mailto:%s\n' "${owner:-you@example.com}" >> "$ENV_FILE"
-fi
-
-# Firefly Pocket's hostname, on an existing server: next. on the domain Pico is on
-# (pico.example.com -> next.example.com). Not a secret, so only when the line is
-# missing altogether; an empty line is left for you to fill.
-if ! grep -qE '^NEXT_HOSTNAME=' "$ENV_FILE"; then
-  pico_host="$(sed -n 's/^PICO_HOSTNAME=//p' "$ENV_FILE" | head -n 1)"
-  if [ -n "$pico_host" ] && [ "$pico_host" != "${pico_host#*.}" ]; then
-    printf 'NEXT_HOSTNAME=next.%s\n' "${pico_host#*.}" >> "$ENV_FILE"
-    echo "==> NEXT_HOSTNAME=next.${pico_host#*.} (Firefly Pocket; check it, and its DNS record)"
-  else
-    printf 'NEXT_HOSTNAME=\n' >> "$ENV_FILE"
-  fi
 fi
 
 # base64url without padding, the encoding Web Push uses for VAPID keys.
@@ -228,7 +212,7 @@ fi
 cat <<'EOF'
 
 Still to fill in by hand (see README):
-  - FIREFLY_HOSTNAME / PICO_HOSTNAME / NEXT_HOSTNAME / IMPORT_HOSTNAME / LEGAL_HOSTNAME, ACME_EMAIL, SITE_OWNER, TZ
+  - FIREFLY_HOSTNAME / NEXT_HOSTNAME / IMPORT_HOSTNAME / LEGAL_HOSTNAME, ACME_EMAIL, SITE_OWNER, TZ
   - IMPORTER_FIREFLY_TOKEN / SUGGESTER_FIREFLY_TOKEN  (stage 2, after registering)
   - ENABLE_BANKING_APP_ID  + compose/secrets/eb/private.pem
   - ANTHROPIC_API_KEY
@@ -237,7 +221,7 @@ Still to fill in by hand (see README):
 EOF
 if grep -qE '^VAPID_(PUBLIC|PRIVATE)_KEY=[[:space:]]*$' "$ENV_FILE"; then
   cat <<'EOF'
-  - VAPID_PUBLIC_KEY / VAPID_PRIVATE_KEY  (push alerts in Pico stay off until both are set;
+  - VAPID_PUBLIC_KEY / VAPID_PRIVATE_KEY  (push alerts in Firefly Pocket stay off until both are set;
     openssl was not usable here — run `npx web-push generate-vapid-keys` and paste them in)
 EOF
 fi

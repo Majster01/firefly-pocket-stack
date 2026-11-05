@@ -59,6 +59,14 @@ for db in firefly firefly_pico fireflyx_importer firefly_next; do
     echo "==> skipping ${db}: not created or not migrated yet"
     continue
   fi
+  # Pico's database is kept until Retire Pico step 6 drops it, and backed up
+  # until then, so the backup before the drop still holds it.
+  if [ "$db" = firefly_pico ] && [ "$(dc exec -T -e PGPASSWORD="$POSTGRES_SUPER_PASSWORD" db \
+        psql -U postgres -d postgres -tAc "SELECT count(*) FROM pg_database WHERE datname = 'firefly_pico'" 2>/dev/null \
+        | tr -d '[:space:]')" != 1 ]; then
+    echo "==> skipping ${db}: dropped"
+    continue
+  fi
   out="$BACKUP_DIR/${db}-${STAMP}.dump"
   echo "==> dumping ${db}"
   if ! dc exec -T -e PGPASSWORD="$POSTGRES_SUPER_PASSWORD" db \
