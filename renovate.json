@@ -25,7 +25,7 @@
   ],
   "packageRules": [
     {
-      "description": "The forks are pinned by .github/workflows/pin.yml when their deploy branch moves; the suggester is built on the server",
+      "description": "Our own images (the forks' and the suggester's) are pinned by .github/workflows/pin.yml when their code changes",
       "matchPackageNames": ["ghcr.io/majster01/**", "firefly-pocket-suggester"],
       "enabled": false
     },

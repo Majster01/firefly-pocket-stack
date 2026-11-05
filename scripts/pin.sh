@@ -1,28 +1,31 @@
 #!/usr/bin/env bash
 #
-# Point a fork's service at another image tag, and commit the change. Merging
-# into master is deploying, so this is how a fork gets deployed:
-# .github/workflows/pin.yml runs it when the fork's CI has pushed an image. By
-# hand it is a rollback (then push):
+# Point a service at another image tag, and commit the change. Merging into
+# master is deploying, so this is how an image built in CI gets deployed:
+# .github/workflows/pin.yml runs it when a fork's CI, or this repository's
+# suggester workflow, has pushed an image. By hand it is a rollback (then push):
 #
 #     scripts/pin.sh next sha-abc1234          # ghcr.io/majster01/firefly-pocket
 #     scripts/pin.sh importer 2.3.5-abc1234    # ghcr.io/majster01/data-importer
+#     scripts/pin.sh suggester sha-abc1234     # ghcr.io/majster01/firefly-pocket-suggester
 #
 # Refuses a tag that GHCR does not serve without a login: the server pulls
-# anonymously, so the fork's package must be public.
+# anonymously, so the package must be public.
 
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 COMPOSE_FILE="$REPO_ROOT/compose/docker-compose.yml"
 
-# was=: the image's earlier name. Its first pin under the new name finds the
-# line by the old one and moves it; after that the old name is not in compose.
+# was=: the image's earlier name, and why it moved. Its first pin under the new
+# name finds the line by the old one and moves it; after that the old name is
+# not in compose.
 case "${1:-}" in
-  next)     name=Next     image=ghcr.io/majster01/firefly-pocket  source=Majster01/firefly-pocket
-            was=ghcr.io/majster01/firefly-pocket-next ;;
-  importer) name=importer image=ghcr.io/majster01/data-importer source=Majster01/data-importer ;;
-  *) echo "usage: $0 next|importer <tag>" >&2; exit 2 ;;
+  next)      name=Next      image=ghcr.io/majster01/firefly-pocket  source=Majster01/firefly-pocket ;;
+  importer)  name=importer  image=ghcr.io/majster01/data-importer source=Majster01/data-importer ;;
+  suggester) name=suggester image=ghcr.io/majster01/firefly-pocket-suggester source=Majster01/firefly-pocket-stack
+             was=firefly-pocket-suggester was_note="the image the server built" ;;
+  *) echo "usage: $0 next|importer|suggester <tag>" >&2; exit 2 ;;
 esac
 tag="${2:-}"
 if ! [[ "$tag" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]]; then
@@ -63,10 +66,15 @@ fi
 
 echo "==> $name $in_compose:$current -> $image:$tag"
 export FROM="$in_compose" IMAGE="$image" TAG="$tag"
-perl -pi -e 's#^(\s*image: )\Q$ENV{FROM}\E:\S+#$1$ENV{IMAGE}:$ENV{TAG}#' "$COMPOSE_FILE"
 moved=""
-[ "$in_compose" = "$image" ] || moved="
-Moved from $in_compose, its earlier name."
+if [ "$in_compose" != "$image" ]; then
+  # A pinned image is pulled, never built: a `build:` right above the old
+  # image line goes with it.
+  perl -0777 -pi -e 's#^[ \t]*build:[^\n]*\n(?=[ \t]*image: \Q$ENV{FROM}\E:)##m' "$COMPOSE_FILE"
+  moved="
+Moved from $in_compose:$current, ${was_note}."
+fi
+perl -pi -e 's#^(\s*image: )\Q$ENV{FROM}\E:\S+#$1$ENV{IMAGE}:$ENV{TAG}#' "$COMPOSE_FILE"
 
 commit="${tag##*-}"   # sha-abc1234 / 2.3.5-abc1234 -> abc1234
 git -C "$REPO_ROOT" commit -q -F - -- "$COMPOSE_FILE" <<EOF

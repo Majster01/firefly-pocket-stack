@@ -183,9 +183,7 @@ services:
   #
   # Built by Majster01/firefly-pocket's CI (branch main) and tagged
   # sha-<commit>. A merge into its main pins the new tag here through
-  # .github/workflows/pin.yml, which deploys it. The image moves from
-  # firefly-pocket-next to ghcr.io/majster01/firefly-pocket: scripts/pin.sh
-  # rewrites this line to the new name on the first pin under it.
+  # .github/workflows/pin.yml, which deploys it.
   next:
     image: ghcr.io/majster01/firefly-pocket:sha-414853e
     container_name: fireflyx-next
@@ -355,10 +353,13 @@ services:
   #   docker compose run --rm suggester suggest --all     # backfill, any date
   #   docker compose run --rm suggester notify            # the daily digest
   #
-  # Built from services/category-suggester; rebuild after changing it with
-  #   docker compose build suggester
+  # Built from services/category-suggester by .github/workflows/suggester.yml
+  # on every merge that changes it, tagged sha-<commit> and pinned here through
+  # .github/workflows/pin.yml, like the forks: the server builds nothing. To try
+  # a change locally:
+  #   docker build -t firefly-pocket-suggester:dev ../services/category-suggester
   suggester:
-    build: ../services/category-suggester
+    build: ../services/category-suggester  # until its first pin, which moves the image to GHCR and drops this line
     image: firefly-pocket-suggester:local
     profiles: [jobs]
     logging: *default-logging

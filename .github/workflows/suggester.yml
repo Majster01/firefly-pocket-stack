@@ -1,0 +1,93 @@
+# Build the category suggester's image and deploy it (Release pipeline step 2).
+# The suggester is the one image this repository makes, and it is made here,
+# not on the server:
+#
+#   1. image   ghcr.io/majster01/firefly-pocket-suggester:sha-<commit>, pushed
+#              only after its tests pass inside it
+#   2. deploy  "Pin fork image" sets that tag in compose and commits to master,
+#              as it does for the forks; the server deploys master.
+#
+# Runs on a merge into master that changes the suggester. Run it by hand
+# (Actions -> Suggester image -> Run workflow) to rebuild master's suggester,
+# e.g. after a failed run. A rollback is a pin of an earlier tag: the
+# "Bump suggester ..." commits in master list them.
+name: Suggester image
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - services/category-suggester/**
+      - .github/workflows/suggester.yml
+  workflow_dispatch:
+
+# A newer merge supersedes a build still running.
+concurrency:
+  group: suggester-image
+  cancel-in-progress: true
+
+permissions: {}
+
+jobs:
+  image:
+    if: github.ref == 'refs/heads/master'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+    env:
+      IMAGE: ghcr.io/majster01/firefly-pocket-suggester
+    steps:
+      - uses: actions/checkout@v5
+
+      - id: tag
+        run: echo "tag=sha-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+
+      # The server is a cx23 (x86). Release pipeline step 9 adds linux/arm64.
+      - name: Build
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          docker build --platform linux/amd64 \
+            --label org.opencontainers.image.source="https://github.com/$GITHUB_REPOSITORY" \
+            --label org.opencontainers.image.revision="$GITHUB_SHA" \
+            --label org.opencontainers.image.description="Category suggester of firefly-pocket-stack" \
+            -t "$IMAGE:$TAG" services/category-suggester
+
+      # The same run as CI's suggester check, so nothing untested is pushed even
+      # when master moved without a PR.
+      - name: Run the tests in it
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          docker run --rm --network none \
+            -v "$PWD/services/category-suggester/tests:/app/tests:ro" \
+            --entrypoint python "$IMAGE:$TAG" -m unittest
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Push
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: docker push "$IMAGE:$TAG"
+
+  # GITHUB_TOKEN may start a workflow_dispatch run, so this needs no secret.
+  pin:
+    needs: image
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      actions: write
+    steps:
+      - name: Pin the image, which deploys it
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.image.outputs.tag }}
+        run: gh workflow run pin.yml --repo "$GITHUB_REPOSITORY" --ref master -f component=suggester -f tag="$TAG"
