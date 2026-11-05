@@ -40,8 +40,6 @@ BRANCH=master
 LOCK_FILE=/run/lock/fireflyx.lock
 DEPLOYED_FILE="$REPO_ROOT/.deployed-rev"
 FAILED_FILE="$REPO_ROOT/.deploy-failed"
-# These migrate a database when a new image starts.
-MIGRATING="app db importer"
 
 compose() { docker compose --project-directory "$COMPOSE_DIR" "$@"; }
 
