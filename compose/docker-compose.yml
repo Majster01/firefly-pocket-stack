@@ -187,7 +187,7 @@ services:
   # firefly-pocket-next to ghcr.io/majster01/firefly-pocket: scripts/pin.sh
   # rewrites this line to the new name on the first pin under it.
   next:
-    image: ghcr.io/majster01/firefly-pocket-next:sha-aacd616
+    image: ghcr.io/majster01/firefly-pocket:sha-414853e
     container_name: fireflyx-next
     restart: unless-stopped
     logging: *default-logging
