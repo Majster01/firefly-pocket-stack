@@ -2,8 +2,10 @@
 #
 # Point a service at another image tag, and commit the change. Merging into
 # master is deploying, so this is how an image built in CI gets deployed:
-# .github/workflows/pin.yml runs it when a fork's CI, or this repository's
-# suggester workflow, has pushed an image. By hand it is a rollback (then push):
+# .github/workflows/pin.yml runs it, through scripts/pin-pr.sh, when a fork's
+# CI or this repository's suggester workflow has pushed an image. master takes
+# no direct pushes, so a rollback is that workflow run by hand; locally this
+# only makes the commit:
 #
 #     scripts/pin.sh next sha-abc1234          # ghcr.io/majster01/firefly-pocket
 #     scripts/pin.sh importer 2.3.5-abc1234    # ghcr.io/majster01/data-importer

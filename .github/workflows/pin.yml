@@ -1,6 +1,6 @@
-# Point a service at a new image, and commit that to master. Merging into
-# master is deploying: the server picks the commit up within two minutes
-# (scripts/deploy.sh, README "Deploying").
+# Point a service at a new image, through a PR that merges itself once CI is
+# green (scripts/pin-pr.sh). Merging into master is deploying: the server picks
+# the commit up within two minutes (scripts/deploy.sh, README "Deploying").
 #
 # The CI that built the image starts this after pushing it:
 #   Majster01/firefly-pocket   main      ->  next       sha-<commit>
@@ -9,6 +9,11 @@
 #
 # Run it by hand (Actions -> Pin fork image -> Run workflow) to roll back to
 # an earlier tag; the "Bump ..." commits in master list them.
+#
+# It acts as the pin app (README "GitHub settings"): the variable PIN_APP_ID
+# and the secret PIN_APP_PRIVATE_KEY. Not GITHUB_TOKEN, because a PR or merge
+# made with GITHUB_TOKEN starts no workflows: CI would never run on the PR, so
+# it would never merge.
 name: Pin fork image
 run-name: Pin ${{ inputs.component }} to ${{ inputs.tag }}
 
@@ -24,35 +29,40 @@ on:
         type: string
         required: true
 
-# In order, per service. A newer pin that arrives while one is waiting replaces
-# the waiting one, which is right: the newest image wins.
+# In order, per service. A newer pin replaces one whose PR is still waiting,
+# which is right: the newest image wins.
 concurrency:
   group: pin-${{ inputs.component }}
   cancel-in-progress: false
 
-permissions:
-  contents: write
+# The app's token does the writing.
+permissions: {}
 
 jobs:
   pin:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
+      - id: app
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ vars.PIN_APP_ID }}
+          private-key: ${{ secrets.PIN_APP_PRIVATE_KEY }}
+
       - uses: actions/checkout@v5
         with:
           ref: master
+          token: ${{ steps.app.outputs.token }}
 
-      - name: Pin and push to master
+      - name: Pin on pin/${{ inputs.component }} and open a PR that merges itself
         env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          APP_SLUG: ${{ steps.app.outputs.app-slug }}
           COMPONENT: ${{ inputs.component }}
           TAG: ${{ inputs.tag }}
         run: |
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          scripts/pin.sh "$COMPONENT" "$TAG"
-          # The other service's pin, or a merge, may land in between.
-          for _ in 1 2 3; do
-            git push -q origin HEAD:master && exit 0
-            git pull -q --rebase origin master
-          done
-          exit 1
+          # Commit as the app's bot user, so GitHub shows who made the pin.
+          bot_id="$(gh api "users/${APP_SLUG}[bot]" --jq .id)"
+          git config user.name "${APP_SLUG}[bot]"
+          git config user.email "${bot_id}+${APP_SLUG}[bot]@users.noreply.github.com"
+          scripts/pin-pr.sh "$COMPONENT" "$TAG"
