@@ -9,6 +9,7 @@ firefly-pocket-stack is the deployment repository of a live personal-finance ser
 - `master` takes no direct pushes; every change is a PR that passes CI. `.github/workflows/pin.yml` opens one for each new image tag of the forks and the suggester (`pin/<service>`, by the pin app), which merges itself once CI is green, and Renovate opens PRs for upstream images. Rebase onto `master` before pushing; never rewrite its history.
 - The server is a git checkout of `master`, reset on every deploy. Never change tracked files on the server: the deploy refuses to run over them. `compose/.env` lives only on the server and is never committed.
 - A change that needs a new `.env` value or secret must say so in its PR: the value has to be on the server before the merge, or the deploy stops at `docker compose`.
+- Releases (`.github/workflows/release.yml`, `scripts/release.sh`) are made by hand, only when the user asks for one; a dry run is always fine.
 - Image tags stay pinned. Don't move Firefly III's or Postgres' image in passing: they migrate databases on start, and the deploy backs up and runs a restore test before it does.
 
 ## Checks

@@ -470,6 +470,19 @@ The old laptop deploys (`deploy-pico.sh`, `deploy-firefly.sh`, `deploy-cron.sh`,
 
 From then on a pin arrives as a PR from the app, *Bump Next to abc1234*, that merges itself when the checks pass, usually within a few minutes (`boot` takes the longest, about a minute and a half), and the merge deploys. A pin PR left open has a failed check; its CI run says which. Each service has one branch, `pin/<service>`: a newer pin replaces a waiting one, and a pin of the tag `master` already runs closes it.
 
+### Releasing
+
+A release names one bundle that has already run as `latest`, and promotes it without rebuilding: Actions → *Release* → *Run workflow*, with a bump and optionally the commit (`scripts/release.sh`). Tick *Dry run* first to see the version and the release notes. It points the release tags at that commit's bundle digest, `X.Y.Z`, `X.Y` and `stable`, then pushes the git tag `vX.Y.Z` and a GitHub release listing every component's image and tag and the changes since the last release.
+
+| Tag | Moves when | For |
+| --- | --- | --- |
+| `latest` | every merge into `master` | your server, and anyone who wants each change |
+| `stable` | every release | the default for new installs |
+| `X.Y` | every release in that line | fixes only |
+| `X.Y.Z`, `sha-<commit>` | never | pinning and rollback |
+
+The bump says what a person running a server has to do: **major**, act (a value only they can give, a Postgres major, a hostname change); **minor**, nothing, migrations included; **patch**, fixes only. The first release is `1.0.0` whatever the bump. A release only moves forward: it refuses a commit older than the last release, one that is not on `master`, and one without a published bundle. The bundle's `release.json` keeps the build number it was published with (`1.0.0-dev.<n>`); the release's version is its tag.
+
 ### Updating Firefly III
 
 Never blind-pull. Firefly III migrates the database on boot, so a version bump is a reviewed PR: Renovate opens one for each new `fireflyiii/core` release. Read the [release notes](https://github.com/firefly-iii/firefly-iii/releases) of every version it crosses, then merge. The server backs up, proves the backup restores, and starts the new version; `docker compose logs -f app` shows the migrations. A new Postgres major version is never offered, since it needs a dump and restore by hand.

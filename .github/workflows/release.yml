@@ -1,0 +1,60 @@
+# Release a commit of master (Release pipeline step 6), by hand: Actions ->
+# Release -> Run workflow. scripts/release.sh does the work: the version from
+# the last vX.Y.Z tag and the bump (the first release is 1.0.0), the release
+# tags X.Y.Z, X.Y and stable on the commit's published bundle, by digest and
+# without rebuilding, then the git tag and a GitHub release that lists the
+# components. Tick "Dry run" first to see the version and the notes.
+name: Release
+run-name: ${{ inputs.dry_run && 'Dry run' || 'Release' }} (${{ inputs.bump }}) of ${{ inputs.commit || 'master' }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: "What a person running a server must do: major, act (a value only they can give, a Postgres major, a hostname); minor, nothing, migrations included; patch, fixes only. Ignored for the first release, 1.0.0."
+        type: choice
+        options: [minor, patch, major]
+      commit:
+        description: The commit of master to release, whose bundle Publish bundle has pushed. Empty is master's head.
+        type: string
+        required: false
+      dry_run:
+        description: Dry run, says what it would do and changes nothing
+        type: boolean
+        default: false
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions: {}
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write   # the git tag and the GitHub release
+      packages: write   # the bundle's release tags
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: master
+          fetch-depth: 0   # every tag, to find the last release
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: ${{ inputs.dry_run && 'Dry run' || 'Release' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BUMP: ${{ inputs.bump }}
+          COMMIT: ${{ inputs.commit }}
+          DRY_RUN: ${{ inputs.dry_run && '1' || '' }}
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          scripts/release.sh "$BUMP" ${COMMIT:+"$COMMIT"}
