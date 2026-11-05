@@ -235,7 +235,7 @@ services:
   # replaced by the first pin; until then this image cannot be pulled, so
   # every deploy stops at "pull images" (README "Adding Firefly Pocket").
   next:
-    image: ghcr.io/majster01/firefly-pocket-next:sha-8e8b890
+    image: ghcr.io/majster01/firefly-pocket-next:sha-f1ef051
     container_name: fireflyx-next
     restart: unless-stopped
     logging: *default-logging
