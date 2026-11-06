@@ -5,7 +5,7 @@ Self-hosted [Firefly III](https://docs.firefly-iii.org/) personal finance stack 
 | Service | What it is | URL |
 |---|---|---|
 | **Firefly III** | The finance app. Source of truth. | `https://firefly.<domain>` |
-| **Firefly Pocket** | The mobile web app ([firefly-pocket](https://github.com/Majster01/firefly-pocket)): web app + API in one image, its own database. | `https://next.<domain>` |
+| **Firefly Pocket** | The mobile web app ([firefly-pocket](https://github.com/Majster01/firefly-pocket)): web app + API in one image, its own database. | `https://app.<domain>` |
 | **Data Importer** | Pulls transactions from your bank via Enable Banking. | `https://import.<domain>` |
 | **Category suggester** | Suggests category rules for you to approve in Firefly Pocket. Nightly one-shot job, plus a trigger only the importer can call. | *not exposed* |
 
@@ -37,7 +37,7 @@ Everything except Firefly III itself is an **API client** using a Personal Acces
 
 ## Prerequisites
 
-- A domain you control, with the ability to add A records
+- A domain you control, with the ability to add a wildcard A record (a subdomain of it works too)
 - A [Hetzner Cloud](https://console.hetzner.cloud) account and API token
 - An [Enable Banking](https://enablebanking.com) account — **check your bank is in their coverage first**; if it is not, the import design needs rethinking
 - An [Anthropic API key](https://console.anthropic.com/) on an account with credit
@@ -59,18 +59,17 @@ Lock `ssh_source_ips` to your own address if it is static — it is the single h
 
 ## 2. Point DNS at it
 
-`terraform output` prints the IP. Create these A records:
+`terraform output` prints the IP. Create one wildcard A record:
 
 ```
-firefly.<domain>   ->  <ip>
-next.<domain>      ->  <ip>
-import.<domain>    ->  <ip>
-legal.<domain>     ->  <ip>
+*.<domain>   ->  <ip>
 ```
+
+It covers the four names the stack answers on: `firefly.`, `app.` (Firefly Pocket), `import.` and `legal.`. `<domain>` can be a subdomain of yours, e.g. `money.example.com` for `app.money.example.com` and the rest; it is what you set as `DOMAIN` below. Caddy still gets a certificate for each name, not a wildcard one, so it needs no DNS API token. A provider without wildcard records takes the four as A records instead. Each name can also be set on its own in `.env` (`FIREFLY_HOSTNAME`, `NEXT_HOSTNAME`, `IMPORT_HOSTNAME`, `LEGAL_HOSTNAME`), e.g. to keep the one a server already uses; then its record is up to you.
 
 Optionally add a CAA record, so no certificate authority other than Let's Encrypt may issue for the domain: `<domain>  CAA  0 issue "letsencrypt.org"`.
 
-**Wait until all of them actually resolve before continuing.** Caddy requests Let's Encrypt certificates on first start; if DNS is not live the challenge fails and nothing comes up.
+**Wait until the names actually resolve before continuing** (`dig +short app.<domain>` prints the IP). Caddy requests Let's Encrypt certificates on first start; if DNS is not live the challenge fails and nothing comes up.
 
 ## 3. Configure
 
@@ -83,7 +82,7 @@ ssh fireflyx@<ip>
 cd /opt/fireflyx
 
 cp compose/.env.example compose/.env
-$EDITOR compose/.env              # hostnames, ACME_EMAIL, SITE_OWNER, TZ
+$EDITOR compose/.env              # DOMAIN, ACME_EMAIL, SITE_OWNER, TZ
 ./scripts/gen-secrets.sh          # generates every secret + the importer password
 ```
 
@@ -126,13 +125,13 @@ ANTHROPIC_API_KEY=...
 docker compose up -d
 ```
 
-Then open `https://next.<domain>` and paste that device's token when it asks. Add it to your phone's home screen — this is the URL you will actually use day to day.
+Then open `https://app.<domain>` and paste that device's token when it asks. Add it to your phone's home screen — this is the URL you will actually use day to day.
 
 ## 6. Connect your bank
 
 1. In the Enable Banking control panel, create an application and download the **PEM private key**.
 2. Put it at `compose/secrets/eb/private.pem` (gitignored) and set `ENABLE_BANKING_APP_ID` in `.env`.
-3. Register two **redirect URLs** in their portal, exactly so: `https://<NEXT_HOSTNAME>/eb-callback`, where links started from Firefly Pocket come back, and `https://<IMPORT_HOSTNAME>/eb-callback`, for the importer's own UI. Caddy sends a callback whose state starts with `fx-` to the importer fork on either host.
+3. Register two **redirect URLs** in their portal, exactly so: `https://app.<domain>/eb-callback`, where links started from Firefly Pocket come back, and `https://import.<domain>/eb-callback`, for the importer's own UI (your `NEXT_HOSTNAME` and `IMPORT_HOSTNAME`, where you set those). Caddy sends a callback whose state starts with `fx-` to the importer fork on either host.
 4. `docker compose up -d importer`
 5. Open `https://import.<domain>` (basic auth) and **run one import interactively**: link the bank, map each bank account to a Firefly asset account, configure duplicate detection.
 6. Download the resulting config and bring it into the importer's database as a **connection**. Only its bank, Enable Banking session and account mapping are kept; every other setting comes from the shared, committed `config/importer-base.json`, so all banks import the same way. The command refuses a config whose settings differ from the base, rather than silently changing how that bank imports:

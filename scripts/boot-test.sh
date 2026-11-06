@@ -12,8 +12,9 @@
 # exists: it makes its own, and its containers, volumes and networks use the
 # server's names.
 #
-#   1. compose/.env from .env.example and gen-secrets.sh, hostnames *.localhost
-#      (Caddy serves those from its own CA, no Let's Encrypt)
+#   1. compose/.env from .env.example and gen-secrets.sh, with DOMAIN=localhost
+#      and no hostname of its own, so every host is derived (*.localhost,
+#      which Caddy serves from its own CA, no Let's Encrypt)
 #   2. Postgres and Firefly III, until Firefly III answers
 #   3. the first user and a Personal Access Token, as stage 2 needs, without
 #      the web UI; the token goes into IMPORTER_FIREFLY_TOKEN and
@@ -73,9 +74,11 @@ set_env() {
 echo "==> compose/.env with throwaway values"
 cp compose/.env.example "$ENV_FILE"
 scripts/gen-secrets.sh >/dev/null
-for host in FIREFLY NEXT IMPORT LEGAL; do
-  set_env "${host}_HOSTNAME" "$(tr '[:upper:]' '[:lower:]' <<<"$host").localhost"
-done
+set_env DOMAIN localhost
+if grep -E '^[A-Z_]+_HOSTNAME=' "$ENV_FILE"; then
+  echo "FATAL: a fresh compose/.env should need only DOMAIN, but sets the hostnames above" >&2
+  exit 1
+fi
 
 # lib.sh reads compose/.env, so it comes after it.
 # shellcheck source=lib.sh

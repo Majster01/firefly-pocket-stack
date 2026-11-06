@@ -58,10 +58,12 @@ class Settings:
             return os.environ.get(key) or file_env.get(key) or default
 
         firefly_url = get("FIREFLY_URL")
-        if not firefly_url and get("FIREFLY_HOSTNAME"):
+        # The host as compose derives it: firefly.DOMAIN unless set on its own.
+        firefly_host = get("FIREFLY_HOSTNAME") or (f"firefly.{get('DOMAIN')}" if get("DOMAIN") else "")
+        if not firefly_url and firefly_host:
             # Local runs: Caddy adds no auth to the Firefly vhost, so the public
             # URL works from a laptop exactly as the internal one does in compose.
-            firefly_url = f"https://{get('FIREFLY_HOSTNAME')}"
+            firefly_url = f"https://{firefly_host}"
 
         model = get("SUGGESTER_MODEL", DEFAULT_MODEL)
         # Only the key of the provider the model belongs to is required.
