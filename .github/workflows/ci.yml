@@ -118,4 +118,3 @@ jobs:
         env:
           FROM: ${{ matrix.from }}
         run: scripts/upgrade-test.sh
-
