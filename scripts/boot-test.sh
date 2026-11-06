@@ -19,7 +19,8 @@
 #      the web UI; the token goes into IMPORTER_FIREFLY_TOKEN and
 #      SUGGESTER_FIREFLY_TOKEN
 #   4. everything, as the deploy starts it: up -d --no-build --remove-orphans
-#   5. the deploy's smoke test, and the token against Firefly III's API
+#   5. the deploy's smoke test, and the token against Firefly III's API and
+#      through Firefly Pocket's, which calls Firefly III on the internal network
 
 set -euo pipefail
 
@@ -121,11 +122,7 @@ compose up -d --no-build --remove-orphans
 echo "==> the deploy's smoke test"
 smoke_test
 
-echo "==> the token against Firefly III's API"
-printf 'header = "Authorization: Bearer %s"\n' "$token" \
-  | docker run --rm -i --network "$DOCKER_NETWORK" "$CURL_IMAGE" \
-      -fsS --max-time 30 --config - -H 'Accept: application/vnd.api+json' \
-      -o /dev/null http://app:8080/api/v1/about/user
-echo "Firefly III accepts the token"
+echo "==> the token against Firefly III's API, and through Firefly Pocket's"
+token_check "$token"
 
 echo "==> booted and checked"
