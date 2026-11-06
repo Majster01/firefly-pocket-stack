@@ -64,14 +64,16 @@ services:
       - caddy_config:/config
     environment:
       ACME_EMAIL: ${ACME_EMAIL:?set ACME_EMAIL in .env}
-      # Each host is <name>.DOMAIN unless .env sets it on its own. The same
-      # defaults are written out wherever a URL needs a host below, and in
-      # scripts/lib.sh for the scripts. DOMAIN is needed only while one of
-      # the four is not set, so a server with all four keeps working without.
-      FIREFLY_HOSTNAME: ${FIREFLY_HOSTNAME:-firefly.${DOMAIN:?set DOMAIN in .env}}
-      NEXT_HOSTNAME: ${NEXT_HOSTNAME:-app.${DOMAIN:?set DOMAIN in .env}}
-      IMPORT_HOSTNAME: ${IMPORT_HOSTNAME:-import.${DOMAIN:?set DOMAIN in .env}}
-      LEGAL_HOSTNAME: ${LEGAL_HOSTNAME:-legal.${DOMAIN:?set DOMAIN in .env}}
+      # Each host is <name>.DOMAIN unless .env sets it on its own, so a server
+      # with all four set needs no DOMAIN. The same defaults are written out
+      # wherever a URL needs a host below, and in scripts/lib.sh, which is what
+      # refuses to go on when a name and DOMAIN are both missing. Compose
+      # cannot: some versions evaluate a ${DOMAIN:?...} inside a default even
+      # when the name is set.
+      FIREFLY_HOSTNAME: ${FIREFLY_HOSTNAME:-firefly.${DOMAIN}}
+      NEXT_HOSTNAME: ${NEXT_HOSTNAME:-app.${DOMAIN}}
+      IMPORT_HOSTNAME: ${IMPORT_HOSTNAME:-import.${DOMAIN}}
+      LEGAL_HOSTNAME: ${LEGAL_HOSTNAME:-legal.${DOMAIN}}
       IMPORT_AUTH_USER: ${IMPORT_AUTH_USER:?set IMPORT_AUTH_USER in .env}
       IMPORT_AUTH_HASH: ${IMPORT_AUTH_HASH:?run scripts/gen-secrets.sh}
       # Filled into the legal pages (compose/legal/*.html are Caddy templates).

@@ -51,12 +51,19 @@ load_env() {
 load_env
 
 # The hostnames as compose derives them (docker-compose.yml, the caddy
-# service): <name>.DOMAIN unless .env sets one on its own. Empty when neither is
-# set; compose then refuses to start, naming DOMAIN.
+# service): <name>.DOMAIN unless .env sets one on its own. Compose would make
+# "firefly." of a missing DOMAIN, so the deploy and the tests stop here instead.
 export FIREFLY_HOSTNAME="${FIREFLY_HOSTNAME:-${DOMAIN:+firefly.$DOMAIN}}"
 export NEXT_HOSTNAME="${NEXT_HOSTNAME:-${DOMAIN:+app.$DOMAIN}}"
 export IMPORT_HOSTNAME="${IMPORT_HOSTNAME:-${DOMAIN:+import.$DOMAIN}}"
 export LEGAL_HOSTNAME="${LEGAL_HOSTNAME:-${DOMAIN:+legal.$DOMAIN}}"
+for _host in FIREFLY_HOSTNAME NEXT_HOSTNAME IMPORT_HOSTNAME LEGAL_HOSTNAME; do
+  if [ -z "${!_host}" ]; then
+    echo "FATAL: set DOMAIN in $ENV_FILE; $_host is not set either" >&2
+    exit 1
+  fi
+done
+unset _host
 
 # Firefly Pocket's Web Push endpoint, reached on the internal network (Caddy refuses
 # /api/internal/* from outside). Only used when NEXT_NOTIFY_TOKEN is set.

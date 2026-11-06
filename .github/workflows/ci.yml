@@ -71,11 +71,15 @@ jobs:
           expect "$(hosts)" "firefly.example.com app.example.com import.example.com legal.example.com https://firefly.example.com https://app.example.com https://firefly.example.com https://app.example.com/eb-callback https://app.example.com"
           expect "$(NEXT_HOSTNAME=next.example.org hosts)" "firefly.example.com next.example.org import.example.com legal.example.com https://firefly.example.com https://next.example.org https://firefly.example.com https://next.example.org/eb-callback https://next.example.org"
           expect "$(DOMAIN= FIREFLY_HOSTNAME=f.example.net NEXT_HOSTNAME=n.example.net IMPORT_HOSTNAME=i.example.net LEGAL_HOSTNAME=l.example.net hosts)" "f.example.net n.example.net i.example.net l.example.net https://f.example.net https://n.example.net https://f.example.net https://n.example.net/eb-callback https://n.example.net"
-          if DOMAIN= NEXT_HOSTNAME=n.example.net docker compose --project-directory compose config -q 2>err.txt; then
-            echo "compose started with a hostname missing and no DOMAIN"; exit 1
+          # A name missing and DOMAIN too: compose cannot refuse that, so the
+          # scripts' lib.sh does, and with it the deploy.
+          sed -i 's/^DOMAIN=.*/DOMAIN=/' compose/.env
+          echo NEXT_HOSTNAME=n.example.net >>compose/.env
+          if bash -c 'source scripts/lib.sh' 2>err.txt; then
+            echo "lib.sh went on with three names missing and no DOMAIN"; exit 1
           fi
-          grep -q 'set DOMAIN in .env' err.txt || { cat err.txt; exit 1; }
-          echo "derived, overridden, and DOMAIN not needed once all four are set"
+          grep -q 'FATAL: set DOMAIN' err.txt || { cat err.txt; exit 1; }
+          echo "derived, overridden, DOMAIN not needed once all four are set, and refused when it is"
 
   suggester:
     runs-on: ubuntu-24.04
