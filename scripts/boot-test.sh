@@ -21,6 +21,8 @@
 #   4. everything, as the deploy starts it: up -d --no-build --remove-orphans
 #   5. the deploy's smoke test, and the token against Firefly III's API and
 #      through Firefly Pocket's, which calls Firefly III on the internal network
+#   6. the legal pages through Caddy: on their host, and under /legal/ on
+#      Firefly Pocket's
 
 set -euo pipefail
 
@@ -124,5 +126,25 @@ smoke_test
 
 echo "==> the token against Firefly III's API, and through Firefly Pocket's"
 token_check "$token"
+
+# By name through Caddy, as a browser asks: its own CA for *.localhost (-k),
+# from this network. The legal pages render on their host and under /legal/
+# on Firefly Pocket's, and the rest of that host is still the app.
+echo "==> the legal pages through Caddy, on both hosts"
+through_caddy() {
+  docker run --rm --network "$DOCKER_NETWORK" "$CURL_IMAGE" \
+    -fsS -k -L --max-time 30 --connect-to ::caddy:443 "$1"
+}
+for url in "https://$LEGAL_HOSTNAME/" "https://$LEGAL_HOSTNAME/privacy" "https://$LEGAL_HOSTNAME/terms" \
+           "https://$NEXT_HOSTNAME/legal" "https://$NEXT_HOSTNAME/legal/privacy" "https://$NEXT_HOSTNAME/legal/terms"; do
+  page="$(through_caddy "$url")" || { echo "no page at $url"; exit 1; }
+  if [[ "$page" != *"</html>"* || "$page" == *"{{"* || "$page" == *'type="module"'* ]]; then
+    echo "not a rendered legal page at $url:"
+    head -c 400 <<<"$page"
+    exit 1
+  fi
+done
+[[ "$(through_caddy "https://$NEXT_HOSTNAME/")" == *'type="module"'* ]] || { echo "the app is not at https://$NEXT_HOSTNAME/"; exit 1; }
+echo "the legal pages render on both hosts, and the app is still the app"
 
 echo "==> booted and checked"
