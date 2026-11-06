@@ -60,10 +60,10 @@ jobs:
       - uses: actions/checkout@v5
 
       # linux/arm64 runs under QEMU: the image is published for both.
-      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-qemu-action@v4
         with:
           platforms: arm64
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@v4
 
       # The tests run inside the image the server runs, built for each platform
       # it is published for.
@@ -156,3 +156,50 @@ jobs:
           fi
           curl -fsS "http://localhost:5000/v2/firefly-pocket-stack/tags/list"
           echo "SIGN TEST OK"
+
+  # WIP, removed before review: the forks' branches, built for both platforms
+  # as their deploy workflows will, then the arm64 image started under QEMU.
+  # Nothing is pushed.
+  fork-arm-test:
+    name: fork-arm-test (${{ matrix.repo }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - repo: Majster01/firefly-pocket
+            file: Dockerfile
+            args: APP_VERSION=arm-test
+            check: php /var/www/html/artisan --version
+          - repo: Majster01/data-importer
+            file: Dockerfile.fireflyx
+            args: IMPORTER_VERSION=2.3.5
+            check: php -v
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          repository: ${{ matrix.repo }}
+          ref: claude/fireflyx-release-pipeline-3x4v74
+      - uses: docker/setup-qemu-action@v4
+        with:
+          platforms: arm64
+      - uses: docker/setup-buildx-action@v4
+      - name: Build both platforms
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ matrix.file }}
+          platforms: linux/amd64,linux/arm64
+          build-args: ${{ matrix.args }}
+          push: false
+      - name: Start the arm64 image
+        env:
+          FILE: ${{ matrix.file }}
+          ARGS: ${{ matrix.args }}
+          CHECK: ${{ matrix.check }}
+        run: |
+          docker buildx build --load --platform linux/arm64 -f "$FILE" --build-arg "$ARGS" -t arm-test .
+          docker image inspect arm-test --format '{{.Os}}/{{.Architecture}}'
+          # shellcheck disable=SC2086
+          docker run --rm --platform linux/arm64 --entrypoint sh arm-test -c "uname -m && $CHECK"
