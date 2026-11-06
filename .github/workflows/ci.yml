@@ -2,8 +2,8 @@
 # deploys, so these are what a change has to pass first. Run the same commands
 # locally before pushing (AGENTS.md "Checks").
 #
-# One check per job. Their names (shellcheck, compose, suggester, boot,
-# bundle, upgrade (stable), upgrade (latest)) are what master's ruleset
+# One check per job. Their names (shellcheck, compose, suggester, console,
+# boot, bundle, upgrade (stable), upgrade (latest)) are what master's ruleset
 # requires, so rename them only together with it.
 name: CI
 
@@ -66,7 +66,7 @@ jobs:
         run: |
           hosts() {
             docker compose --project-directory compose config --format json | jq -r '
-              [.services.caddy.environment | .FIREFLY_HOSTNAME, .NEXT_HOSTNAME, .IMPORT_HOSTNAME, .LEGAL_HOSTNAME]
+              [.services.caddy.environment | .FIREFLY_HOSTNAME, .NEXT_HOSTNAME, .IMPORT_HOSTNAME, .LEGAL_HOSTNAME, .ADMIN_HOSTNAME]
               + [.services.app.environment.APP_URL, .services.next.environment.APP_URL]
               + [.services.importer.environment | .VANITY_URL, .FIREFLY_POCKET_CALLBACK_URL, .FIREFLY_POCKET_APP_URL]
               | join(" ")'
@@ -74,9 +74,11 @@ jobs:
           expect() {
             [ "$1" = "$2" ] || { printf 'expected: %s\n     got: %s\n' "$2" "$1"; exit 1; }
           }
-          expect "$(hosts)" "firefly.example.com app.example.com import.example.com legal.example.com https://firefly.example.com https://app.example.com https://firefly.example.com https://app.example.com/eb-callback https://app.example.com"
-          expect "$(NEXT_HOSTNAME=next.example.org hosts)" "firefly.example.com next.example.org import.example.com legal.example.com https://firefly.example.com https://next.example.org https://firefly.example.com https://next.example.org/eb-callback https://next.example.org"
-          expect "$(DOMAIN= FIREFLY_HOSTNAME=f.example.net NEXT_HOSTNAME=n.example.net IMPORT_HOSTNAME=i.example.net LEGAL_HOSTNAME=l.example.net hosts)" "f.example.net n.example.net i.example.net l.example.net https://f.example.net https://n.example.net https://f.example.net https://n.example.net/eb-callback https://n.example.net"
+          expect "$(hosts)" "firefly.example.com app.example.com import.example.com legal.example.com admin.example.com https://firefly.example.com https://app.example.com https://firefly.example.com https://app.example.com/eb-callback https://app.example.com"
+          expect "$(NEXT_HOSTNAME=next.example.org hosts)" "firefly.example.com next.example.org import.example.com legal.example.com admin.example.com https://firefly.example.com https://next.example.org https://firefly.example.com https://next.example.org/eb-callback https://next.example.org"
+          # Without DOMAIN the console has no name until ADMIN_HOSTNAME is set:
+          # Caddy serves admin.localhost, from its own CA, and asks no ACME CA.
+          expect "$(DOMAIN= FIREFLY_HOSTNAME=f.example.net NEXT_HOSTNAME=n.example.net IMPORT_HOSTNAME=i.example.net LEGAL_HOSTNAME=l.example.net hosts)" "f.example.net n.example.net i.example.net l.example.net admin.localhost https://f.example.net https://n.example.net https://f.example.net https://n.example.net/eb-callback https://n.example.net"
           # A name missing and DOMAIN too: compose cannot refuse that, so the
           # scripts' lib.sh does, and with it the deploy.
           sed -i 's/^DOMAIN=.*/DOMAIN=/' compose/.env
@@ -86,6 +88,18 @@ jobs:
           fi
           grep -q 'FATAL: set DOMAIN' err.txt || { cat err.txt; exit 1; }
           echo "derived, overridden, DOMAIN not needed once all four are set, and refused when it is"
+
+      # The setup gate: compose says "done" exactly when the importer has its
+      # token, to Caddy and the console alike.
+      - name: The setup gate follows the importer's token
+        run: |
+          gate() {
+            docker compose --project-directory compose config --format json \
+              | jq -r '[.services.caddy.environment.FIREFLY_POCKET_SETUP, .services.console.environment.FIREFLY_POCKET_SETUP] | join(" ")'
+          }
+          [ "$(IMPORTER_FIREFLY_TOKEN= gate)" = " " ] || { echo "gated: expected empty, got '$(IMPORTER_FIREFLY_TOKEN= gate)'"; exit 1; }
+          [ "$(IMPORTER_FIREFLY_TOKEN=eyJ0x gate)" = "done done" ] || { echo "open: expected done, got '$(IMPORTER_FIREFLY_TOKEN=eyJ0x gate)'"; exit 1; }
+          echo "gated without the token, open with it"
 
   suggester:
     runs-on: ubuntu-24.04
@@ -103,6 +117,22 @@ jobs:
       # it is published for.
       - name: Build the suggester image and run its tests in it
         run: scripts/suggester-test.sh
+
+  # The Firefly Pocket Console's tests, in the image compose runs it on and the
+  # way compose runs it: its directory mounted read-only, as an unprivileged
+  # user on a read-only root.
+  console:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: The console's tests
+        run: |
+          image="$(awk '/^  console:/ { found = 1 } found && /^    image:/ { print $2; exit }' compose/docker-compose.yml)"
+          echo "in $image"
+          docker run --rm --read-only --user 10001:10001 --tmpfs /tmp \
+            -v "$PWD/services/console:/app:ro" -w /app "$image" python -I -B test_console.py
 
   # The whole stack from scratch, as a new server starts it, checked with the
   # deploy's own smoke test (Release pipeline step 4). On a pin PR this boots

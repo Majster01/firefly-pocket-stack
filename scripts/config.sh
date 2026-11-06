@@ -133,6 +133,9 @@ check_value() {
       [[ "$v" =~ $re ]] || echo "one word, without spaces, \$ or \\" ;;
     line)
       [[ "$v" != *$'\n'* && "$v" != *$'\r'* ]] || echo "one line" ;;
+    setupcode)
+      re='^[0-9A-HJKMNP-TV-Z]{4}(-[0-9A-HJKMNP-TV-Z]{4}){3}$'
+      [[ "$v" =~ $re ]] || echo "four groups of four capitals and digits, as setup web makes it" ;;
     *)
       echo "checked by '$1', which this version does not know" ;;
   esac

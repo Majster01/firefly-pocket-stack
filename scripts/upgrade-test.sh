@@ -20,7 +20,8 @@
 #      adds (README: re-run it on upgrades)
 #   4. up -d --no-build --remove-orphans from this checkout, as the deploy does
 #   5. the deploy's smoke test, and the token made on the old version against
-#      Firefly III's API and through Firefly Pocket's: the data came through
+#      Firefly III's API and through Firefly Pocket's: the data came through.
+#      And the setup gate open: a server with its account shows the app
 #   6. a server whose .env is still edited by hand: config import, as yours
 #      runs it once, and up -d again, which must recreate nothing: every value
 #      is still the same
@@ -71,7 +72,7 @@ finish() {
   elif [ -f "$old/compose/.env" ]; then
     docker compose --project-directory "$old/compose" down -v --remove-orphans >/dev/null 2>&1 || true
   fi
-  rm -rf "$ENV_FILE" "${STORE[@]}" compose/.env.before-import
+  rm -rf "$ENV_FILE" "${STORE[@]}" compose/.env.before-import compose/console
   rm -rf "$old"
   exit "$status"
 }
@@ -97,6 +98,8 @@ scripts/gen-secrets.sh | sed -n '/Filled:/,/^$/p'
 [ -z "$carried" ] || scripts/firefly-pocket config render
 # shellcheck source=lib.sh
 source "$REPO_ROOT/scripts/lib.sh"
+# As the deploy does it: the console's directories before compose starts it.
+scripts/firefly-pocket console status
 compose up -d --no-build --remove-orphans
 
 echo "==> the deploy's smoke test"
@@ -104,6 +107,17 @@ smoke_test
 
 echo "==> the token made on $from, against Firefly III's API and through Firefly Pocket's"
 token_check "$IMPORTER_FIREFLY_TOKEN"
+
+# A server set up before the console must not end up behind its setup gate:
+# it has its account, so every name answers as before.
+echo "==> the setup gate is open: Firefly Pocket's host shows the app, not the console"
+page="$(docker run --rm --network "$DOCKER_NETWORK" "$CURL_IMAGE" -fsS -k --max-time 30 \
+  --connect-to ::caddy:443 "https://$NEXT_HOSTNAME/")" || page=""
+if [[ "$page" != *'type="module"'* ]]; then
+  echo "https://$NEXT_HOSTNAME/ is not the app after the upgrade:"
+  head -c 400 <<<"$page"
+  exit 1
+fi
 
 if [ -z "$carried" ]; then
   echo "==> its hand-edited .env into the settings store, as your server does it once"

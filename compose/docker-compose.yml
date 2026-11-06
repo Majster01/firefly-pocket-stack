@@ -33,6 +33,10 @@ networks:
   # `fireflyx` means a compromised Dozzle cannot reach the apps or Postgres.
   dozzle_ui:
     name: dozzle_ui
+  # The console's, shared with Caddy only, so a compromised console reaches
+  # Caddy and the internet (it looks names up), not the apps or Postgres.
+  console:
+    name: fireflyx_console
 
 volumes:
   caddy_data:
@@ -44,15 +48,15 @@ volumes:
 
 services:
   # ---------------------------------------------------------------- caddy ---
-  # Terminates TLS for all three subdomains and is the only thing bound to the
-  # host. Certificates are obtained from Let's Encrypt on first boot, so DNS
-  # must already resolve to this machine or startup will fail to get a cert.
+  # Terminates TLS for every host and is the only thing bound to the host.
+  # Certificates are obtained from Let's Encrypt on first boot, so DNS must
+  # already resolve to this machine or startup will fail to get a cert.
   caddy:
     image: caddy:2.11.7-alpine
     container_name: fireflyx-caddy
     restart: unless-stopped
     logging: *default-logging
-    networks: [fireflyx]
+    networks: [fireflyx, console]
     ports:
       - "80:80"
       - "443:443"
@@ -74,6 +78,14 @@ services:
       NEXT_HOSTNAME: ${NEXT_HOSTNAME:-app.${DOMAIN:-}}
       IMPORT_HOSTNAME: ${IMPORT_HOSTNAME:-import.${DOMAIN:-}}
       LEGAL_HOSTNAME: ${LEGAL_HOSTNAME:-legal.${DOMAIN:-}}
+      # The console's. A server with no DOMAIN has none until it is set, and
+      # Caddy serves admin.localhost instead: its own certificate, no ACME.
+      ADMIN_HOSTNAME: ${ADMIN_HOSTNAME:-admin.${DOMAIN:-localhost}}
+      # The setup gate (Caddyfile): "done" once the importer has its Firefly III
+      # token, which setup makes right after the account. Until then every host
+      # but the console's sends the browser to the console. A change recreates
+      # Caddy, as its environment changed.
+      FIREFLY_POCKET_SETUP: ${IMPORTER_FIREFLY_TOKEN:+done}
       IMPORT_AUTH_USER: ${IMPORT_AUTH_USER:?set IMPORT_AUTH_USER in .env}
       IMPORT_AUTH_HASH: ${IMPORT_AUTH_HASH:?run scripts/gen-secrets.sh}
       # Filled into the legal pages (compose/legal/*.html are Caddy templates).
@@ -94,6 +106,42 @@ services:
       - app
       - next
       - importer
+      - console
+
+  # -------------------------------------------------------------- console ---
+  # The Firefly Pocket Console on admin.<domain> (Setup UI). Until Firefly III
+  # has its account it is all this server shows, and asks for the setup code
+  # that `scripts/firefly-pocket setup web` prints; after that it only says
+  # where things are. Its source is services/console, run on the stock image,
+  # mounted read-only.
+  #
+  # It holds no secret but that code, and cannot touch Docker or the settings.
+  # It can add a request to console/inbox, which it cannot list, and read
+  # console/status; the host agent checks each request as `config set` would,
+  # applies it and writes the status (scripts/console.sh, which makes both
+  # directories before this starts). Another user than the agent's, on a
+  # read-only root, with no capability, on Caddy's network only.
+  console:
+    image: python:3.13.15-slim
+    container_name: fireflyx-console
+    restart: unless-stopped
+    logging: *default-logging
+    networks: [console]
+    user: "10001:10001"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    working_dir: /app
+    command: ["python", "-I", "-B", "-u", "/app/console.py"]
+    volumes:
+      - ../services/console:/app:ro
+      - ./console/inbox:/inbox
+      - ./console/status:/status:ro
+    environment:
+      FIREFLY_POCKET_SETUP: ${IMPORTER_FIREFLY_TOKEN:+done}
+      SETUP_CODE: ${SETUP_CODE:-}
+      # Which certificates it checks: those of Let's Encrypt production only.
+      ACME_CA: ${ACME_CA:-https://acme-v02.api.letsencrypt.org/directory}
 
   # ------------------------------------------------------------------- db ---
   # One database per app on one instance, each owned by its own least-privilege role.

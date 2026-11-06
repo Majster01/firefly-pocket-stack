@@ -14,11 +14,12 @@ firefly-pocket-stack is the deployment repository of a live personal-finance ser
 
 ## Checks
 
-CI (`.github/workflows/ci.yml`) runs these on every PR into `master`, as the checks `shellcheck`, `compose`, `suggester`, `boot`, `bundle`, `upgrade (stable)` and `upgrade (latest)`. Run the ones your change touches before pushing:
+CI (`.github/workflows/ci.yml`) runs these on every PR into `master`, as the checks `shellcheck`, `compose`, `suggester`, `console`, `boot`, `bundle`, `upgrade (stable)` and `upgrade (latest)`. Run the ones your change touches before pushing:
 
 - `git ls-files -z '*.sh' | xargs -0 shellcheck -x -P scripts` for scripts. CI runs shellcheck 0.11.0.
 - `docker compose --project-directory compose config -q` with a `compose/.env` for compose changes (the `:?` variables must be set; dummy values are fine locally, or `cp compose/.env.example compose/.env && scripts/gen-secrets.sh` as CI does).
 - `python -m unittest` in `services/category-suggester` for the suggester, with `requirements.txt` installed. CI runs them inside the suggester's image, for both platforms it is published for: `scripts/suggester-test.sh` (`PLATFORMS=linux/amd64` for one; `linux/arm64` on an x86 machine needs QEMU).
+- `python3 -I -B services/console/test_console.py` for the Firefly Pocket Console. CI runs it in the console's image (compose's `python` tag), read-only, as compose runs it.
 - `scripts/make-bundle.sh <empty-dir>` assembles the release bundle that `.github/workflows/publish.yml` pushes on every merge: it reads every image's digest from its registry, so it needs network access to them. `scripts/agent.sh compare <dir>` then checks it against the checkout, as CI does; a new file the server reads goes into `BUNDLE_PATHS` in `scripts/lib.sh`.
 - `FROM=latest scripts/upgrade-test.sh` boots a published bundle and upgrades it to the checkout; same rules as `boot-test.sh`.
 - `scripts/boot-test.sh` boots the whole stack with throwaway values and runs the deploy's smoke test (`KEEP=1` leaves it running). It needs Docker, refuses to run where `compose/.env` exists, and is never for the server: its containers use the server's names.

@@ -7,6 +7,8 @@ compose/config.json.*
 compose/.env.*
 !compose/.env.example
 compose/.import.*
+# The console's inbox and status (scripts/console.sh).
+compose/console/
 !compose/secrets/.gitkeep
 !compose/secrets/eb/.gitkeep
 
