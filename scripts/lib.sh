@@ -291,6 +291,23 @@ internal_http() {
 # Firefly Pocket's /api/test is a plain Laravel route: nginx, php-fpm and the
 # app, no Firefly call and no login. The deploy's last step, and what CI checks
 # a booted stack with (scripts/boot-test.sh).
+# token_check <token>: a Firefly III token works, at Firefly III's API and
+# through Firefly Pocket's, which forwards it to Firefly III on this network.
+# The boot and upgrade tests run it with the token they made.
+token_check() {
+  local url
+  for url in http://app:8080/api/v1/about/user http://next:80/api/user; do
+    if ! printf 'header = "Authorization: Bearer %s"\n' "$1" \
+        | docker run --rm -i --network "$DOCKER_NETWORK" "$CURL_IMAGE" \
+            -fsS --max-time 30 --config - -H 'Accept: application/vnd.api+json' \
+            -o /dev/null "$url"; then
+      echo "the token does not work at $url"
+      return 1
+    fi
+  done
+  echo "Firefly III accepts the token, and Firefly Pocket too"
+}
+
 smoke_test() {
   local url svc down="" _
   for url in http://app:8080/health http://importer:8080/health \

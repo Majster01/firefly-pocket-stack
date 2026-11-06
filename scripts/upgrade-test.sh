@@ -19,7 +19,7 @@
 #      fill in any secret this version adds (README: re-run it on upgrades)
 #   4. up -d --no-build --remove-orphans from this checkout, as the deploy does
 #   5. the deploy's smoke test, and the token made on the old version against
-#      Firefly III's API: the data came through
+#      Firefly III's API and through Firefly Pocket's: the data came through
 #
 # Needs Docker. Never for the server: like boot-test.sh, it uses the server's
 # names, and refuses where a compose/.env exists.
@@ -89,11 +89,7 @@ compose up -d --no-build --remove-orphans
 echo "==> the deploy's smoke test"
 smoke_test
 
-echo "==> the token made on $from, against Firefly III's API"
-printf 'header = "Authorization: Bearer %s"\n' "$IMPORTER_FIREFLY_TOKEN" \
-  | docker run --rm -i --network "$DOCKER_NETWORK" "$CURL_IMAGE" \
-      -fsS --max-time 30 --config - -H 'Accept: application/vnd.api+json' \
-      -o /dev/null http://app:8080/api/v1/about/user
-echo "Firefly III still knows the user and the token"
+echo "==> the token made on $from, against Firefly III's API and through Firefly Pocket's"
+token_check "$IMPORTER_FIREFLY_TOKEN"
 
 echo "==> upgraded from $from and checked"
