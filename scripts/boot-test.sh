@@ -358,7 +358,9 @@ request="${BASH_REMATCH[1]}"
 scripts/firefly-pocket console apply
 [ "$(state "${request##*/}")" = applied ] || fail "the application's ID: $(state "${request##*/}"): $(jq -r --arg id "${request##*/}" '.requests[$id].message' compose/console/status/status.json)"
 [ "$(scripts/firefly-pocket config get ENABLE_BANKING_APP_ID)" = "$app_id" ] || fail "the application's ID was not kept"
-[ "$(compose exec -T importer printenv ENABLE_BANKING_APP_ID)" = "$app_id" ] || fail "the importer did not start again with the ID"
+# What compose gave the importer: it is recreated with the ID.
+given="$(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$(compose ps -q importer)" | grep '^ENABLE_BANKING_APP_ID=' || true)"
+[ "$given" = "ENABLE_BANKING_APP_ID=$app_id" ] || fail "the importer did not start again with the ID: it has \"$given\""
 page="$(ask_console "$request")"
 [[ "$page" == *"Firefly Pocket CI"*"Next: Finish"* ]] || fail "the console does not say the ID was kept"
 echo "the key stays on the server, its certificate is handed out, and only the right ID is kept"
