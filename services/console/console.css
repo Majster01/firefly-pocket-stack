@@ -143,3 +143,18 @@ fieldset.field { border: 0; padding: 0; margin: 0 0 16px; }
 fieldset.field legend { font-weight: 600; margin-bottom: 4px; padding: 0; }
 label.choice { display: inline-flex; gap: 6px; align-items: center; font-weight: 400; margin-right: 18px; }
 label.choice input { width: auto; }
+/* The backups step's two ways, one under the other, each with what it needs. */
+fieldset.field > label.choice { display: flex; margin: 10px 0 4px; }
+.indent { margin-left: 26px; }
+.indent .field { margin-bottom: 8px; }
+/* A new repository's password: to copy out, whole. */
+p.password code {
+  display: block;
+  padding: 10px 12px;
+  border: 1px solid var(--edge);
+  border-radius: 6px;
+  background: var(--accent-tint);
+  font-size: 1rem;
+  letter-spacing: 0.04em;
+  user-select: all;
+}

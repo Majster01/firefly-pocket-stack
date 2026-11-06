@@ -145,6 +145,10 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
+      # As cloud-init does on a server: the backups step runs it.
+      - name: Install restic
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq restic
+
       - name: Boot the stack and run the deploy's smoke test
         run: scripts/boot-test.sh
 
@@ -184,6 +188,10 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
+
+      # The boot test of the bundle it starts from runs the backups step.
+      - name: Install restic
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq restic
 
       - name: Boot ${{ matrix.from }} and upgrade it to this commit
         env:

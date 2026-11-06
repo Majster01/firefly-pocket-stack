@@ -14,9 +14,10 @@ keeps the application's ID once Enable Banking takes a request signed with the
 key for it. Then the AI key for suggestions, which the server keeps once the
 provider has the model for it, and the alerts: an ntfy topic, kept once a test
 alert gets through, and healthchecks.io's two checks, made with an API key the
-server does not keep. Saved keys are write-only: this shows their last four
-characters. Finish ends the setup code. Backups and updates run over SSH for
-now, until the console takes those steps over too.
+server does not keep. Then the offsite backup: a restic repository, made with
+a password this shows you once to keep, or one restic uses already. Saved keys
+are write-only: this shows their last four characters. Finish ends the setup
+code. Updates run over SSH for now, until the console takes that step over too.
 
 It is built so that taking it over gains little:
 
@@ -26,7 +27,9 @@ It is built so that taking it over gains little:
   (scripts/console.sh). Each carries the setup code, which the agent checks
   too. What it shows comes from /status, which the agent writes and which
   holds no secret. The password goes into its request and nowhere else, and
-  the bank's private key never leaves the server.
+  the bank's private key never leaves the server. A new repository's password
+  is made here and kept in memory only until the server has made the
+  repository with it.
 - The setup code works only until setup is finished, when the server removes
   it and starts this again without it. After that the console only says where
   things are, and the agent refuses its requests too.
@@ -154,11 +157,11 @@ STEPS = (
     ("Bank connection", "/bank"),
     ("Suggestions", "/suggestions"),
     ("Alerts", "/alerts"),
-    ("Backups", None),
+    ("Backups", "/backups"),
     ("Updates", None),
     ("Finish", "/finish"),
 )
-SERVER, ACCOUNT, BANK, SUGGESTIONS, ALERTS, FINISH = 0, 1, 2, 3, 4, 7
+SERVER, ACCOUNT, BANK, SUGGESTIONS, ALERTS, BACKUPS, FINISH = 0, 1, 2, 3, 4, 5, 7
 
 # Firefly III's minimum, which the agent checks again.
 MIN_PASSWORD = 16
@@ -176,14 +179,15 @@ OUTCOME = {
     "ntfy": ("Saved", "Not saved", "Sending a test alert"),
     "ntfy_test": ("Sent", "Not sent", "Sending a test alert"),
     "healthchecks": ("Made", "Not made", "Making the checks"),
+    "backups": ("Saved", "Not saved", "Opening the repository"),
     "finish": ("Setup is finished", "Not finished", "Finishing"),
 }
 # The page each request goes back to, and the step after it once it is done.
 BACK = {"server": "/server", "account": "/account", "bank_key": "/bank", "bank": "/bank", "suggestions": "/suggestions",
-        "ntfy": "/alerts", "ntfy_test": "/alerts", "healthchecks": "/alerts", "finish": "/finish"}
+        "ntfy": "/alerts", "ntfy_test": "/alerts", "healthchecks": "/alerts", "backups": "/backups", "finish": "/finish"}
 NEXT = {"server": ("/account", "Firefly III account"), "account": ("/bank", "Bank connection"),
-        "bank": ("/suggestions", "Suggestions"), "suggestions": ("/alerts", "Alerts"), "ntfy": ("/finish", "Finish"),
-        "ntfy_test": ("/finish", "Finish"), "healthchecks": ("/finish", "Finish")}
+        "bank": ("/suggestions", "Suggestions"), "suggestions": ("/alerts", "Alerts"), "ntfy": ("/backups", "Backups"),
+        "ntfy_test": ("/backups", "Backups"), "healthchecks": ("/backups", "Backups"), "backups": ("/finish", "Finish")}
 
 # As scripts/config.sh checks an API key and a model, and the providers' defaults.
 API_KEY_RE = re.compile(r"[A-Za-z0-9._-]{16,}")
@@ -191,6 +195,11 @@ MODEL_RE = re.compile(r"(claude|gemini)-[a-z0-9.-]+")
 DEFAULT_MODEL = "claude-haiku-5-5"
 PROVIDERS = {"anthropic": "Anthropic", "gemini": "Gemini"}
 URL_RE = re.compile(r"https?://[^\s$\\]+")
+# A restic repository as scripts/config.sh checks it (one word), and a new one's
+# password, as gen-secrets.sh makes RESTIC_PASSWORD.
+REPOSITORY_RE = re.compile(r"[^\s\x00-\x1f\x7f…]+")
+REPOSITORY_EXAMPLE = "s3:https://s3.eu-central-003.backblazeb2.com/your-bucket/firefly-pocket"
+RESTIC_PASSWORD_LENGTH = 32
 
 # As scripts/config.sh checks ENABLE_BANKING_APP_ID.
 APP_ID_RE = re.compile(r"[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}")
@@ -420,6 +429,10 @@ class Console:
         self.failures: deque[float] = deque()
         # request id: (when, its action, the host the console moves to)
         self.pending: dict[str, tuple[float, str, str]] = {}
+        # The password a new restic repository gets, the same each time the
+        # backups page shows it, and the request that makes a repository with it.
+        self.restic_password = ""
+        self.password_request = ""
 
     @classmethod
     def from_env(cls, env=os.environ) -> Console:
@@ -477,6 +490,8 @@ class Console:
             return self.alerts_page(req)
         if path in ("/alerts/ntfy", "/alerts/test", "/alerts/healthchecks") and post:
             return self.save_alerts(req, path.rsplit("/", 1)[1])
+        if path == "/backups":
+            return self.save_backups(req) if post else self.backups_page(req)
         if path == "/finish":
             return self.save_finish(req) if post else self.finish_page(req)
         match = re.fullmatch(r"/requests/([0-9a-f]{32})", path)
@@ -908,6 +923,8 @@ class Console:
             return page(req, 503, note=NO_INBOX)
         with self.lock:
             self.pending[rid] = (self.clock(), action, "")
+            if action == "backups" and fields.get("mode") == "new":
+                self.password_request = rid
         return redirect(f"/requests/{rid}")
 
     # -------------------------------------------------------- suggestions ---
@@ -1072,7 +1089,7 @@ class Console:
     timezone.</p>
     {checks_html}
     <h2>Next</h2>
-    <p><a class="button" href="/finish">Next: Finish</a></p>
+    <p><a class="button" href="/backups">Next: Backups</a></p>
   </section>
 </div>"""
         return self.page(status, "Alerts", body, signed_in=True)
@@ -1095,6 +1112,162 @@ class Console:
         if not API_KEY_RE.fullmatch(key):
             return self.alerts_page(req, 400, {"key": "An API key: at least 16 letters and digits"})
         return self.hand_over(req, "healthchecks", {"key": key}, self.alerts_page)
+
+    # ------------------------------------------------------------ backups ---
+    def new_repository_password(self, state: dict) -> str:
+        """The password a new repository gets: made here, and the same on every
+        view, so the one you kept is the one sent, until the server has made a
+        repository with it. Then it is forgotten."""
+        requests = part(state, "requests")
+        with self.lock:
+            result = requests.get(self.password_request) if self.password_request else None
+            if isinstance(result, dict) and result.get("state") == "applied":
+                self.restic_password, self.password_request = "", ""
+            elif isinstance(result, dict) and result.get("state") in ("refused", "failed"):
+                self.password_request = ""
+            if not self.restic_password:
+                self.restic_password = new_password()
+            return self.restic_password
+
+    def backups_page(self, req: Request, status: int = 200, values=None, errors=None, note: str = "") -> Response:
+        state = read_status(self.status_file)
+        if not account_made(state):
+            return self.needs_account(BACKUPS, "Backups", status)
+        kept = part(state, "backups")
+        repository = str(kept.get("repository") or "")
+        key_id, secret_key = str(kept.get("access_key_id") or ""), str(kept.get("secret_access_key") or "")
+        password = self.new_repository_password(state)
+        values = values or {"repository": repository if "…" not in repository else "",
+                            "mode": "existing" if repository else "new"}
+        errors = errors or {}
+        no_restic = ""
+        if kept.get("restic") is False:
+            no_restic = ('<p class="error">restic is not installed on this server. On the server: '
+                         "<code>sudo apt-get install -y restic</code>, then save this.</p>")
+
+        def text_field(name: str, label: str, help_text: str, value: str = "", placeholder: str = "") -> str:
+            error = errors.get(name, "")
+            described = f"{name}-help" + (f" {name}-error" if error else "")
+            return f"""
+      <div class="field">
+        <label for="{name}">{esc(label)}</label>
+        <input id="{name}" name="{name}" value="{esc(value)}" autocomplete="off" spellcheck="false"
+               {f'placeholder="{esc(placeholder)}" ' if placeholder else ''}aria-describedby="{described}"{' aria-invalid="true"' if error else ''}>
+        {f'<p class="error" id="{name}-error">{esc(error)}</p>' if error else ''}
+        <p class="quiet" id="{name}-help">{help_text}</p>
+      </div>"""
+
+        keeps = " Empty keeps this server's, <code>{}</code>."
+        mode = values.get("mode", "new")
+        mode_error = errors.get("mode", "")
+        form = f"""
+    <form method="post" action="/backups" novalidate>
+      {text_field("repository", "Repository",
+                  "S3 storage (Backblaze B2, Hetzner Object Storage, AWS) as <code>s3:https://&lt;endpoint&gt;/&lt;bucket&gt;/"
+                  "&lt;folder&gt;</code>; restic's other kinds (<code>sftp:</code>, <code>rest:</code>, a path) work too.",
+                  values.get("repository", ""), REPOSITORY_EXAMPLE)}
+      {text_field("access_key_id", "S3 access key ID",
+                  "For S3 only." + (keeps.format(esc(key_id)) if key_id else ""))}
+      {secret_field("secret_access_key", "S3 secret access key", errors.get("secret_access_key", ""),
+                    "For S3 only. Kept on the server: this page shows its last four characters, never the key."
+                    + (f" Empty keeps this server's, {secret_key}." if secret_key else ""), required=False)}
+      <fieldset class="field"><legend>Its password</legend>
+        {f'<p class="error">{esc(mode_error)}</p>' if mode_error else ''}
+        <label class="choice"><input type="radio" name="mode" value="new"{" checked" if mode == "new" else ""}>
+          A new repository: the server makes it, with this password</label>
+        <div class="indent">
+          <p class="password"><code>{esc(password)}</code></p>
+          <input type="hidden" name="new_password" value="{esc(password)}">
+          <p class="quiet">Keep it off this server, in your password manager: without it nobody can read the copy,
+          you included, once this server is gone. This page shows it until the server has made the repository,
+          and never again.</p>
+          <label class="choice"><input type="checkbox" name="saved" value="yes"{" checked" if values.get("saved") else ""}{
+            ' aria-invalid="true" aria-describedby="saved-error"' if errors.get("saved") else ''}>
+            I have kept this password off this server</label>
+          {f'<p class="error" id="saved-error">{esc(errors["saved"])}</p>' if errors.get("saved") else ''}
+        </div>
+        <label class="choice"><input type="radio" name="mode" value="existing"{" checked" if mode == "existing" else ""}>
+          One restic uses already: its password</label>
+        <div class="indent">
+          {secret_field("password", "Password", errors.get("password", ""),
+                        "As you kept it when the repository was made."
+                        + (" Empty: this server's, the one it backs up with now." if repository else ""), required=False)}
+        </div>
+      </fieldset>
+      <button type="submit">Check and save</button>
+    </form>
+    <p class="quiet">The server opens the repository with restic, or makes it, before it keeps any of this.</p>"""
+        if repository:
+            saved_html = f"""
+    <p class="good">This server backs up to <code>{esc(repository)}</code> each night.</p>
+    <details{" open" if errors else ""}><summary>Another repository, or new keys</summary>{form}</details>"""
+            after = '<p><a class="button" href="/finish">Next: Finish</a></p>'
+        else:
+            saved_html = form
+            after = """<p>Without one, losing this server loses everything. <a href="/finish">Skip it for now</a>: on the
+    server, <code>scripts/firefly-pocket setup backups</code> does it later.</p>"""
+        body = f"""
+<div class="setup">
+  {stepper(BACKUPS, state)}
+  <section class="panel">
+    <h1>Backups</h1>
+    {note}
+    <p>At 02:00 each night the databases, the attachments and the settings are backed up on this server. A
+    <a href="https://restic.net/" rel="noreferrer">restic</a> repository keeps an encrypted copy off it too.</p>
+    {no_restic}
+    {saved_html}
+    <h2>Next</h2>
+    {after}
+  </section>
+</div>"""
+        return self.page(status, "Backups", body, signed_in=True)
+
+    def save_backups(self, req: Request) -> Response:
+        state = read_status(self.status_file)
+        if not account_made(state):
+            return self.backups_page(req, 409)
+        kept = part(state, "backups")
+        form = req.form()
+        repository = form.get("repository", "").strip()
+        key_id = form.get("access_key_id", "").strip()
+        secret_key = form.get("secret_access_key", "").strip()
+        mode = form.get("mode", "")
+        values = {"repository": repository, "mode": mode, "saved": form.get("saved", "")}
+        errors: dict[str, str] = {}
+        if not REPOSITORY_RE.fullmatch(repository):
+            errors["repository"] = "A restic repository, without spaces: such as " + REPOSITORY_EXAMPLE
+        if repository.startswith("s3:"):
+            if not key_id and not kept.get("access_key_id"):
+                errors["access_key_id"] = "S3 needs it"
+            if not secret_key and not kept.get("secret_access_key"):
+                errors["secret_access_key"] = "S3 needs it"
+        for name, value in (("access_key_id", key_id), ("secret_access_key", secret_key)):
+            if value and not REPOSITORY_RE.fullmatch(value):
+                errors[name] = "No spaces"
+        fields = {"repository": repository, "access_key_id": key_id, "secret_access_key": secret_key, "mode": mode}
+        if mode == "new":
+            password = form.get("new_password", "")
+            if len(password) < 16 or not password.isalnum() or not password.isascii():
+                errors["mode"] = "Choose again: that password is not one this page made"
+            elif form.get("saved") != "yes":
+                errors["saved"] = "Keep it first: without it nobody can read the copy"
+            else:
+                # The one shown again, if the server refuses the repository.
+                with self.lock:
+                    self.restic_password = password
+            fields["password"] = password
+        elif mode == "existing":
+            password = form.get("password", "")
+            if any(ord(c) < 32 or ord(c) == 127 for c in password):
+                errors["password"] = "No control characters"
+            elif not password and not kept.get("repository"):
+                errors["password"] = "Its password"
+            fields["password"] = password
+        else:
+            errors["mode"] = "A new repository, or one restic uses already"
+        if errors:
+            return self.backups_page(req, 400, values, errors)
+        return self.hand_over(req, "backups", fields, self.backups_page)
 
     # ------------------------------------------------------------- finish ---
     def finish_page(self, req: Request, status: int = 200, note: str = "") -> Response:
@@ -1130,6 +1303,10 @@ class Console:
         alerts_html = (", and ".join(alerts) if alerts else
                        '<span class="bad">only the Firefly Pocket app:</span> no ntfy, and nothing tells you when this '
                        "server is down. <code>scripts/firefly-pocket setup alerts</code> does it later.")
+        repository = str(part(state, "backups").get("repository") or "")
+        backups_html = (f"each night to <code>{esc(repository)}</code>" if repository else
+                        '<span class="bad">on this server only:</span> losing it loses everything. '
+                        "<code>scripts/firefly-pocket setup backups</code> does it later.")
         body = f"""
 <div class="setup">
   {stepper(FINISH, state)}
@@ -1144,15 +1321,12 @@ class Console:
       <tr><th scope="row"><a href="/bank">Bank connection</a></th><td>{bank}</td></tr>
       <tr><th scope="row"><a href="/suggestions">Suggestions</a></th><td>{suggestions}</td></tr>
       <tr><th scope="row"><a href="/alerts">Alerts</a></th><td>{alerts_html}</td></tr>
+      <tr><th scope="row"><a href="/backups">Backups</a></th><td>{backups_html}</td></tr>
     </tbody></table>
     <h2>Left for the server, over SSH</h2>
-    <p>These have no page here yet. On the server, each is <code>scripts/firefly-pocket setup &lt;step&gt;</code>,
-    before or after Finish:</p>
-    <ul>
-      <li><code>backups</code>: a restic repository, off this server</li>
-      <li><code>updates</code>: the deploy agent. It also runs the nightly jobs: the bank import, the backup and
-      the restore tests. Until it is on, nothing runs on a schedule.</li>
-    </ul>
+    <p>Updates have no page here yet. On the server, before or after Finish:
+    <code>scripts/firefly-pocket setup updates</code> turns on the deploy agent. It also runs the nightly jobs: the
+    bank import, the backup and the restore tests. Until it is on, nothing runs on a schedule.</p>
     <h2>Finish setup</h2>
     <p>Then the setup code works no more, and this console only says where things are, until it signs in with
     Firefly III.</p>
@@ -1183,6 +1357,8 @@ class Console:
                                  f'<p><a class="button" href="{back}">Back to setup</a></p></section>', signed_in=True)
             if action == "bank_key":  # nothing to read: the bank page shows the certificate
                 return redirect("/bank")
+            if action == "backups":  # a new repository's password is not shown again
+                self.new_repository_password(state)
             links = f'<a class="button" href="{back}">Back to setup</a>'
             if action in NEXT:
                 path, name = NEXT[action]
@@ -1191,7 +1367,8 @@ class Console:
                 links = 'This console starts again without the code: <a href="/">open it again</a> in a moment.'
             return self.page(200, done, f'<section class="narrow"><h1>{done}</h1><p>{message}</p><p>{links}</p></section>',
                              signed_in=True)
-        takes = "This takes a few minutes." if action == "account" else "This takes a few seconds."
+        takes = {"account": "This takes a few minutes.", "backups": "This can take a minute."}.get(
+            action, "This takes a few seconds.")
         if isinstance(result, dict):  # running: the server says how far it got
             if self.stale(result):
                 body = f"""<section class="narrow"><h1>{not_done}</h1>
@@ -1281,7 +1458,7 @@ def next_step(state: dict) -> str:
     if not account_made(state):
         return "/account" if server_saved(state) else "/server"
     done = steps_done(state)
-    for step, path in ((BANK, "/bank"), (SUGGESTIONS, "/suggestions"), (ALERTS, "/alerts")):
+    for step, path in ((BANK, "/bank"), (SUGGESTIONS, "/suggestions"), (ALERTS, "/alerts"), (BACKUPS, "/backups")):
         if step not in done:
             return path
     return "/finish"
@@ -1299,6 +1476,8 @@ def steps_done(state: dict) -> set[int]:
     alerts = part(state, "alerts")
     if alerts.get("ntfy") or alerts.get("healthchecks"):
         done.add(ALERTS)
+    if part(state, "backups").get("repository"):
+        done.add(BACKUPS)
     return done
 
 
@@ -1306,6 +1485,12 @@ def new_topic() -> str:
     """24 lower-case letters and digits, as the wizard makes an ntfy topic's name."""
     alphabet = "abcdefghijklmnopqrstuvwxyz0123456789"
     return "".join(secrets.choice(alphabet) for _ in range(24))
+
+
+def new_password() -> str:
+    """A new repository's password: as gen-secrets.sh makes RESTIC_PASSWORD."""
+    alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
+    return "".join(secrets.choice(alphabet) for _ in range(RESTIC_PASSWORD_LENGTH))
 
 
 def stepper(current: int, state: dict) -> str:
@@ -1317,7 +1502,7 @@ def stepper(current: int, state: dict) -> str:
         label = f'<a href="{path}">{esc(name)}</a>' if path and i != current else esc(name)
         items += f'<li class="{kind}"{aria}>{label}</li>'
     return f"""<nav class="steps" aria-label="Setup steps"><ol>{items}</ol>
-    <p class="quiet">Backups and updates run over SSH for now.</p></nav>"""
+    <p class="quiet">Updates run over SSH for now.</p></nav>"""
 
 
 def password_field(name: str, label: str, error: str, help_text: str) -> str:
@@ -1333,14 +1518,14 @@ def password_field(name: str, label: str, error: str, help_text: str) -> str:
       </div>"""
 
 
-def secret_field(name: str, label: str, error: str, help_text: str) -> str:
+def secret_field(name: str, label: str, error: str, help_text: str, required: bool = True) -> str:
     """A key to send to the server: never shown again, after an error either."""
     described = " ".join(x for x in (f"{name}-help", f"{name}-error" if error else "") if x)
     return f"""
       <div class="field">
         <label for="{name}">{esc(label)}</label>
         <input id="{name}" name="{name}" type="password" autocomplete="off" spellcheck="false"
-               required{' aria-invalid="true"' if error else ''} aria-describedby="{described}">
+               {'required' if required else ''}{' aria-invalid="true"' if error else ''} aria-describedby="{described}">
         {f'<p class="error" id="{name}-error">{esc(error)}</p>' if error else ''}
         <p class="quiet" id="{name}-help">{esc(help_text)}</p>
       </div>"""
