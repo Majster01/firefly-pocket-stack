@@ -171,6 +171,8 @@ if [ -n "$STORE" ]; then
 
   print_filled
   print_password
+  # The setup wizard asks for the rest itself (scripts/setup.sh).
+  [ -z "${FROM_SETUP:-}" ] || exit 0
   missing=""
   for key in DOMAIN ACME_EMAIL SITE_OWNER IMPORTER_FIREFLY_TOKEN SUGGESTER_FIREFLY_TOKEN \
              ENABLE_BANKING_APP_ID ENABLE_BANKING_PRIVATE_KEY ANTHROPIC_API_KEY NTFY_URL RESTIC_REPOSITORY; do

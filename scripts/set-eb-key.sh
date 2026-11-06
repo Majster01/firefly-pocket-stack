@@ -103,8 +103,10 @@ PLD="$(printf '{"iss":"enablebanking.com","aud":"api.enablebanking.com","iat":%s
 SIG="$(printf '%s.%s' "$HDR" "$PLD" | openssl dgst -sha256 -sign "$PEM" -binary | b64url)"
 JWT="$HDR.$PLD.$SIG"
 
+# With no answer at all curl writes 000 itself, and fails.
 HTTP_CODE="$(curl -s -o /tmp/eb-app.$$ -w '%{http_code}' --max-time 25 \
-  -H "Authorization: Bearer $JWT" https://api.enablebanking.com/application || echo 000)"
+  -H "Authorization: Bearer $JWT" https://api.enablebanking.com/application || true)"
+HTTP_CODE="${HTTP_CODE:-000}"
 APP_JSON="$(cat "/tmp/eb-app.$$" 2>/dev/null || true)"
 rm -f "/tmp/eb-app.$$"
 
@@ -137,6 +139,14 @@ NAME="$(printf '%s' "$APP_JSON" | jq -r '.name // "unknown"' 2>/dev/null)"
 echo "==> application : $NAME"
 echo "==> environment : $ENVIRONMENT"
 printf '%s' "$APP_JSON" | jq -r '.redirect_urls[]? | "==> redirect    : \(.)"' 2>/dev/null
+# Both callbacks must be registered, exactly: a link started from Firefly Pocket
+# comes back to its host, one from the importer's UI to the importer's.
+HOSTS="$(set +eu; source "$REPO_ROOT/scripts/lib.sh" >/dev/null 2>&1 && printf '%s %s' "$NEXT_HOSTNAME" "$IMPORT_HOSTNAME")" || HOSTS=""
+for host in $HOSTS; do
+  if ! printf '%s' "$APP_JSON" | jq -e --arg u "https://$host/eb-callback" '(.redirect_urls // []) | index($u)' >/dev/null 2>&1; then
+    echo "==> WARNING     : https://$host/eb-callback is not a redirect URL of this application; add it in the control panel"
+  fi
+done
 printf '%s' "$APP_JSON" | jq -r 'if (.services // []) | index("PIS") then "==> WARNING     : app requests PIS (payment initiation) — not needed by Firefly Pocket" else "==> services    : \(.services // [] | join(\", \"))" end' 2>/dev/null
 
 if [ "$ENVIRONMENT" = "SANDBOX" ]; then
@@ -153,12 +163,15 @@ if [ "$ENVIRONMENT" = "SANDBOX" ]; then
   restricted mode by linking your own accounts in the Enable Banking
   control panel (free for personal use). A new application means a
   new ID and a new PEM — re-run this script with both, and register
-  both redirect URLs on it (README "Connect your bank"):
+  both redirect URLs on it (README "Connect your bank"; or let
+  scripts/firefly-pocket setup bank make the key and certificate):
   https://app.<DOMAIN>/eb-callback and https://import.<DOMAIN>/eb-callback.
   ------------------------------------------------------------------
 EOF
 fi
 
+# The setup wizard starts the stack itself afterwards.
+[ -z "${FROM_SETUP:-}" ] || exit 0
 echo
 echo "Next: recreate the importer:"
 echo "  docker compose up -d --force-recreate importer"

@@ -14,7 +14,8 @@
 #   4. a hand edit to .env: refused, naming the setting and not its value, then
 #      put in with set --force or dropped with render --force
 #   5. import: a server-like hand-edited .env comes out with every value as it
-#      was, keeps the lines no setting reads, and refuses a bad value whole
+#      was, keeps the lines no setting reads, and refuses a bad value whole;
+#      list shows a value set to nothing as (empty), and unset removes a kept line
 
 # ok always succeeds, so `test && ok ... || fail ...` is an if/else here; and the
 # single-quoted $ in the test values are meant literally.
@@ -184,6 +185,10 @@ grep -q '^PICO_DB_PASSWORD  *kept from the imported .env$' <<<"$(fp list)" && ok
 expect_refused "a second import" fp import
 fp set IMPORT_LOOKBACK_DAYS 7 >/dev/null && [ "$(value IMPORT_LOOKBACK_DAYS)" = 7 ] && [ "$(value LOGS_HOSTNAME)" = logs.example.org ] \
   && ok "after the import, config set works and the kept lines stay" || fail "config set after the import"
+grep -q '^TZ  *(empty)$' <<<"$(fp list)" && ok "list shows a setting set to nothing as (empty)" || fail "list does not show TZ as (empty)"
+fp unset PICO_DB_PASSWORD >/dev/null && [ ! -e compose/secrets/env/PICO_DB_PASSWORD ] && ! grep -q '^PICO_DB_PASSWORD=' compose/.env \
+  && grep -q '^LOGS_HOSTNAME=' compose/.env && ok "unset removes one kept line, from the store and .env" || fail "unset PICO_DB_PASSWORD"
+expect_refused "unset of a name that is no setting and no kept line" fp unset NO_SUCH_SETTING
 
 echo
 if [ "$failures" -gt 0 ]; then

@@ -8,8 +8,10 @@
 #     scripts/firefly-pocket config set <KEY> -        the same, the value read from stdin, so a key
 #                                                      stays out of the shell's history. --force:
 #                                                      even though .env was edited by hand
-#     scripts/firefly-pocket config unset <KEY>        back to its default (a secret: no value)
+#     scripts/firefly-pocket config unset <KEY>        back to its default (a secret: no value); a
+#                                                      line kept from an imported .env: removed
 #     scripts/firefly-pocket config has <KEY>          exit 0 when it has a value, for scripts
+#     scripts/firefly-pocket config check <KEY> <value>  exit 0 when the value would pass (- for stdin)
 #     scripts/firefly-pocket config render [--force]   write compose/.env from the store (the deploy does)
 #     scripts/firefly-pocket config import             move a hand-edited compose/.env into the store, once
 #
@@ -415,8 +417,16 @@ cmd_set() {
 
 cmd_unset() {
   [ $# -eq 1 ] || die "usage: firefly-pocket config unset <KEY>"
-  known "$1"
   need_store
+  # A line kept from the imported .env, which no setting reads: gone for good.
+  if ! [[ -v KIND[$1] ]] && [[ "$1" =~ ^[A-Z_][A-Z0-9_]*$ ]] && [ -f "$SECRETS/$1" ]; then
+    not_edited
+    rm -f "$SECRETS/$1"
+    render
+    echo "$1: removed (it was kept from the imported .env)"
+    return 0
+  fi
+  known "$1"
   not_edited
   drop "$1"
   render
@@ -439,6 +449,16 @@ cmd_has() {
   [ -n "$(value_of "$1")" ]
 }
 
+# check <KEY> <value>: what set would say of the value, without keeping it.
+cmd_check() {
+  [ $# -eq 2 ] || die "usage: firefly-pocket config check <KEY> <value>, or - for the value to be read from stdin"
+  known "$1"
+  local value="$2" problem
+  [ "$value" != - ] || value="$(read_secret_value "$1")"
+  problem="$(check_value "${CHECK[$1]}" "$value")"
+  [ -z "$problem" ] || { echo "$1: $problem" >&2; return 1; }
+}
+
 cmd_list() {
   need_store
   load_config
@@ -450,6 +470,8 @@ cmd_list() {
     elif ! [[ -v CFG[$key] ]]; then
       value="${value:+$value (default)}"
       value="${value:-not set}"
+    elif [ -z "$value" ]; then
+      value="(empty)"
     fi
     printf '%-27s %s\n' "$key" "$value"
   done
@@ -465,6 +487,7 @@ case "$command" in
   unset)  cmd_unset "$@" ;;
   get)    cmd_get "$@" ;;
   has)    cmd_has "$@" ;;
+  check)  cmd_check "$@" ;;
   list)   cmd_list "$@" ;;
   import) cmd_import "$@" ;;
   render)
@@ -472,7 +495,7 @@ case "$command" in
     render
     ;;
   *)
-    sed -n '3,15s/^# \{0,1\}//p' "${BASH_SOURCE[0]}" >&2
+    sed -n '3,17s/^# \{0,1\}//p' "${BASH_SOURCE[0]}" >&2
     exit 2
     ;;
 esac
