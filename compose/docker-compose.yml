@@ -193,10 +193,8 @@ services:
     environment:
       APP_KEY: ${NEXT_APP_KEY:?run scripts/gen-secrets.sh}
       APP_URL: https://${NEXT_HOSTNAME:?set NEXT_HOSTNAME in .env}
-      # Firefly III on this network, as the importer and the suggester reach
-      # it, not out through Caddy and back. Only Pocket's server calls it: the
-      # browser talks to Pocket's own /api, never to Firefly III.
-      FIREFLY_URL: http://app:8080
+      # The public Firefly III URL, not the internal container name.
+      FIREFLY_URL: https://${FIREFLY_HOSTNAME}
       # Also the timezone the cache of Firefly answers expires at midnight in.
       TZ: ${TZ:-Etc/UTC}
       DB_CONNECTION: pgsql
