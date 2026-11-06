@@ -59,17 +59,16 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      # The tests run inside the image the server runs: the same Python, the
-      # same pinned packages, the same user. The image has no tests, so they
-      # are mounted read-only; and no network, as none of them needs one.
-      - name: Build the suggester image
-        run: docker build -t suggester:ci services/category-suggester
+      # linux/arm64 runs under QEMU: the image is published for both.
+      - uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+      - uses: docker/setup-buildx-action@v3
 
-      - name: Run the suggester's tests in it
-        run: |
-          docker run --rm --network none \
-            -v "$PWD/services/category-suggester/tests:/app/tests:ro" \
-            --entrypoint python suggester:ci -m unittest -v
+      # The tests run inside the image the server runs, built for each platform
+      # it is published for.
+      - name: Build the suggester image and run its tests in it
+        run: scripts/suggester-test.sh
 
   # The whole stack from scratch, as a new server starts it, checked with the
   # deploy's own smoke test (Release pipeline step 4). On a pin PR this boots
