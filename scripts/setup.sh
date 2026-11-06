@@ -466,7 +466,7 @@ check_certificates() {
     sleep 10
   done
   problem "no certificate after three minutes: ${pending[*]}. Caddy says:"
-  compose logs --no-log-prefix --since 10m caddy 2>&1 | grep -iE '"level":"error"|challenge failed' | tail -n 4 | cut -c1-300 | sed 's/^/     /'
+  compose logs --no-log-prefix --since 10m caddy 2>&1 | grep -iE '"level":"error"|challenge failed' | tail -n 4 | cut -c1-300 | sed 's/^/     /' || true
   say "Look at the DNS records (scripts/firefly-pocket setup domain), then scripts/firefly-pocket setup start."
   return 1
 }
