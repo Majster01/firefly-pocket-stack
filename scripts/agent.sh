@@ -57,6 +57,7 @@ die() { echo "agent: $*" >&2; exit 1; }
 usage() { sed -n '8,11s/^#     //p' "${BASH_SOURCE[0]}" >&2; exit 2; }
 sha256_of() { echo "sha256:$(sha256sum "$1" | cut -d' ' -f1)"; }
 short_digest() { echo "${1:0:19}"; }   # sha256: and 12 hex digits
+indent() { sed 's/^/    /'; }
 
 # ------------------------------------------------------------- registry ---
 # resolve <tag|digest>: the bundle's manifest into $TMP/manifest.json, its
@@ -196,10 +197,11 @@ shadow() {
     commit_status agent/shadow "$deployed" success "bundle $version is the same as the checkout"
   else
     n="$(wc -l <<<"$diffs")"
-    { echo "$(date -Is) $short $version $DIGEST DIFFERENT in $n"; sed 's/^/    /' <<<"$diffs"; } >> "$SHADOW_LOG"
-    echo "==> shadow: the bundle of $short ($version) differs from the checkout in $n:"
-    sed 's/^/    /' <<<"$diffs"
-    commit_status agent/shadow "$deployed" failure "bundle $version differs from the checkout in $n (.shadow.log)"
+    if [ "$n" -eq 1 ]; then n="1 difference"; else n="$n differences"; fi
+    { echo "$(date -Is) $short $version $DIGEST DIFFERENT: $n"; indent <<<"$diffs"; } >> "$SHADOW_LOG"
+    echo "==> shadow: the bundle of $short ($version) has $n from the checkout:"
+    indent <<<"$diffs"
+    commit_status agent/shadow "$deployed" failure "bundle $version: $n from the checkout, listed in .shadow.log"
     notify_ntfy "Firefly Pocket: the bundle of $short differs from the checkout" "Shadow mode, nothing was deployed from it. In /opt/fireflyx/.shadow.log:
 $diffs"
   fi
@@ -230,7 +232,7 @@ case "${1:-}" in
     diffs="$(compare_files "$2")"
     if [ -n "$diffs" ]; then
       echo "the bundle in $2 differs from this checkout:"
-      sed 's/^/    /' <<<"$diffs"
+      indent <<<"$diffs"
       exit 1
     fi
     echo "the bundle in $2 is the same as this checkout"
