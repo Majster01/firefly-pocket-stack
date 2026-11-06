@@ -14,7 +14,8 @@
 # compose (it checks the result).
 #
 # The files keep their paths in this repository, so a server can diff a bundle
-# against a checkout (Server agent step 1). Only the image lines differ.
+# against a checkout: scripts/agent.sh compare, which CI runs on each bundle it
+# assembles, and the server agent's shadow mode. Only the image lines differ.
 #
 # Versions: a master build is numbered after the next minor, so after v1.4.2
 # it is 1.5.0-dev.<n>, <n> being the commits on master since that tag, and it
@@ -36,13 +37,13 @@ fi
 git() { command git -C "$REPO_ROOT" "$@"; }
 commit="$(git rev-parse --verify "$rev^{commit}")"
 
-# Everything a server reads, and nothing it does not: no CI, Terraform, docs or
-# the suggester's source (its image is in the bundle by digest).
-PATHS=(
-  LICENSE crontab scripts config
-  compose/docker-compose.yml compose/Caddyfile compose/.env.example
-  compose/initdb compose/legal compose/secrets compose/importer
-)
+# Everything a server reads, and nothing it does not: BUNDLE_PATHS in that
+# revision's scripts/lib.sh.
+read -ra PATHS <<<"$(git show "$commit:scripts/lib.sh" | sed -nE 's/^BUNDLE_PATHS="([^"]*)"$/\1/p')"
+if [ "${#PATHS[@]}" -eq 0 ]; then
+  echo "FATAL: no BUNDLE_PATHS line in scripts/lib.sh of $rev" >&2
+  exit 1
+fi
 mkdir -p "$out"
 git archive "$commit" -- "${PATHS[@]}" | tar -x -C "$out"
 

@@ -98,6 +98,11 @@ jobs:
           scripts/make-bundle.sh "$RUNNER_TEMP/bundle"
           cat "$RUNNER_TEMP/bundle/release.json"
 
+      # What the server agent's shadow mode checks on the server, files only:
+      # the bundle holds this checkout's files, and only the image lines differ.
+      - name: Compare it with the checkout
+        run: scripts/agent.sh compare "$RUNNER_TEMP/bundle"
+
   # A published bundle booted, then upgraded to this commit the way a deploy
   # does it, and checked again (Release pipeline step 8): from stable, what new
   # installs run, and from latest, what your server runs, so the very upgrade

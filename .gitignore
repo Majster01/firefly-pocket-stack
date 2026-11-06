@@ -33,9 +33,12 @@ backups/
 
 .DS_Store
 
-# Deploy agent state on the server (scripts/deploy.sh).
+# Deploy agent state on the server (scripts/deploy.sh, scripts/agent.sh).
 .deployed-rev
 .deploy-failed
+.shadow-rev
+.shadow-wait
+.shadow.log
 
 # Python bytecode from running the suggester tests.
 __pycache__/

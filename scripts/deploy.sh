@@ -43,23 +43,9 @@ FAILED_FILE="$REPO_ROOT/.deploy-failed"
 
 compose() { docker compose --project-directory "$COMPOSE_DIR" "$@"; }
 
-# github_status <rev> <state> <description>
-#
-# Optional: the result as a commit status ("deploy/server") on GitHub, so the
-# commit list shows which revision the server runs. DEPLOY_STATUS_TOKEN in .env
-# is a fine-grained token for this repository only, "Commit statuses: write".
-# The token goes to curl on stdin, so it does not show in `ps`.
-github_status() {
-  [ -n "${DEPLOY_STATUS_TOKEN:-}" ] || return 0
-  local slug
-  slug="$(git remote get-url origin | sed -E 's#^(git@github\.com:|https://github\.com/)##; s#\.git$##')"
-  printf 'header = "Authorization: Bearer %s"\n' "$DEPLOY_STATUS_TOKEN" \
-    | curl -fsS --max-time 15 -o /dev/null --config - \
-        -H 'Accept: application/vnd.github+json' \
-        --data "{\"state\":\"$2\",\"context\":\"deploy/server\",\"description\":$(json_string "$3" 140)}" \
-        "https://api.github.com/repos/$slug/statuses/$1" \
-    || echo "WARN: could not set the GitHub commit status" >&2
-}
+# github_status <rev> <state> <description>: the deploy's commit status,
+# deploy/server. The canary gate of a release reads it (scripts/release.sh).
+github_status() { commit_status deploy/server "$@"; }
 
 # ---------------------------------------------------------------- check ---
 # Lock, see whether master moved, move the checkout to it, and continue in the
@@ -79,7 +65,13 @@ if [ "${1:-}" != --apply ]; then
   target="$(git rev-parse FETCH_HEAD)"
   deployed="$(cat "$DEPLOYED_FILE" 2>/dev/null || true)"
   if [ -z "$force" ]; then
-    [ "$target" = "$deployed" ] && exit 0
+    if [ "$target" = "$deployed" ]; then
+      # Nothing to deploy: compare the release bundle with this checkout, the
+      # server agent's shadow mode (scripts/agent.sh). It deploys nothing, and
+      # cannot hold up a deploy for long or fail one.
+      timeout 300 "$REPO_ROOT/scripts/agent.sh" shadow || echo "WARN: shadow mode failed (exit $?)" >&2
+      exit 0
+    fi
     [ "$target" = "$(cat "$FAILED_FILE" 2>/dev/null || true)" ] && exit 0
   fi
 
