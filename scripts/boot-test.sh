@@ -8,8 +8,8 @@
 #     scripts/boot-test.sh            # boots, checks, then removes everything it made
 #     KEEP=1 scripts/boot-test.sh     # leaves the stack running to look at
 #
-# Needs Docker and nothing else, and never runs where a compose/.env already
-# exists: it makes its own, and its containers, volumes and networks use the
+# Needs Docker and restic (cloud-init installs it on a server), and never runs
+# where a compose/.env already exists: it makes its own, and its containers, volumes and networks use the
 # server's names.
 #
 #   1. scripts/firefly-pocket setup web, as a new server starts in the browser
@@ -41,12 +41,16 @@
 #   5. the console's suggestions and alerts steps: a wrong AI key refused and the
 #      right one kept, an ntfy topic kept once a test alert reaches it, and
 #      healthchecks.io's two checks made, in the server's timezone, with an API key
-#      that is not kept. No key is in a file the console reaches
+#      that is not kept. No key is in a file the console reaches. Then backups: a
+#      restic repository on the runner, made with the password the console shows
+#      once, which opens it; an empty place refused as an existing repository, a
+#      wrong password refused, the right one kept. The password is in no file the
+#      console reaches
 #   6. the console's Finish: the setup code goes, the console starts again without
 #      it, and the code signs in no more
 #   7. scripts/firefly-pocket setup, as a new server runs it next, its answers
-#      piped in: Enter for what the console saved, the bank's ID and the AI key
-#      checked again, backups skipped, the deploy agent off. It must ask no password
+#      piped in: Enter for what the console saved, the bank's ID, the AI key and
+#      the repository checked again, the deploy agent off. It must ask no password
 #      and keep the console's tokens. That sets no hostname, so each is derived
 #      (*.localhost, which Caddy serves from its own CA); the secrets come from
 #      gen-secrets.sh, and compose/.env is written from the settings store. The
@@ -70,6 +74,10 @@ if [ -f "$ENV_FILE" ] || [ -e compose/config.json ] || [ -e compose/secrets/env 
   echo "       run it in a fresh checkout, never on the server." >&2
   exit 1
 fi
+command -v restic >/dev/null 2>&1 || {
+  echo "FATAL: restic is not installed (sudo apt-get install -y restic): the backups step needs it, as on a server" >&2
+  exit 1
+}
 if [ -n "$(docker ps -aq --filter name=^fireflyx-)" ]; then
   echo "FATAL: containers named fireflyx-* exist already; this would collide with them." >&2
   exit 1
@@ -467,6 +475,30 @@ done
 grep -rqF -- "$healthchecks_key" compose/config.json compose/secrets compose/.env && fail "the healthchecks.io API key was kept"
 echo "the AI key, the topic and the checks are kept once they work, and the console sees only their last four"
 
+echo "==> the console's backups: a repository made with the password it shows once"
+repository="$jar/restic"
+shown="$(ask_console "$admin/backups" | sed -n 's/.*<p class="password"><code>\([A-Za-z0-9]*\)<\/code>.*/\1/p' | head -n 1)"
+[ "${#shown}" -ge 32 ] || fail "the backups page shows no password to keep"
+went="$(ask_console "${here[@]}" -o /dev/null -w '%{http_code}' --data-urlencode "repository=$repository" \
+  --data-urlencode mode=new --data-urlencode "new_password=$shown" "$admin/backups")"
+[ "$went" = 400 ] || fail "the console sent a new repository's password nobody said they kept: $went"
+post /backups "repository=$repository" mode=existing password=not-its-password
+[ "$posted" = refused ] || fail "an empty place as a repository restic uses: $posted: $said"
+[[ "$said" == *"Nothing is there yet"* ]] || fail "the server does not say nothing is there: $said"
+post /backups "repository=$repository" mode=new "new_password=$shown" saved=yes
+[ "$posted" = applied ] || fail "the new repository: $posted: $said"
+RESTIC_REPOSITORY="$repository" RESTIC_PASSWORD="$shown" restic --no-cache cat config >/dev/null \
+  || fail "the repository does not open with the password the console showed"
+[ "$(scripts/firefly-pocket config get RESTIC_REPOSITORY)" = "$repository" ] || fail "the repository was not kept"
+[[ "$(ask_console "$admin/backups")" != *"$shown"* ]] || fail "the console shows the password again once the repository is made"
+post /backups "repository=$repository" mode=existing password=not-its-password
+[ "$posted" = refused ] || fail "a wrong password: $posted: $said"
+post /backups "repository=$repository" mode=existing "password=$shown"
+[ "$posted" = applied ] || fail "the repository with its password: $posted: $said"
+[[ "$said" == *"0 snapshots"* ]] || fail "the server does not say what is in the repository: $said"
+grep -rqF -- "$shown" compose/console && fail "the restic password is in a file the console reaches"
+echo "the repository is made with the password the console shows once, and kept once it opens"
+
 echo "==> the console's Finish: the setup code goes"
 went="$(ask_console "${here[@]}" -o /dev/null -w '%{http_code} %{redirect_url}' --data '' "$admin/finish")"
 [[ "$went" =~ ^303\ ($admin/requests/[0-9a-f]{32})$ ]] || fail "Finish got \"$went\""
@@ -497,11 +529,12 @@ answers=(
   ''               # ntfy: the console's topic
   n                # no test alert
   ''               # healthchecks.io: the console's checks
-  ''               # restic repository: none
+  ''               # restic repository: the console's, opened again
   n                # deploy agent: off, never on a runner
 )
 echo "==> scripts/firefly-pocket setup, as a new server runs it next, with throwaway answers"
-printf '%s\n' "${answers[@]}" | scripts/firefly-pocket setup
+printf '%s\n' "${answers[@]}" | scripts/firefly-pocket setup | tee "$jar/setup.out"
+grep -q 'ok: the repository opens' "$jar/setup.out" || fail "the wizard did not open the console's repository again"
 if grep -E '^[A-Z_]+_HOSTNAME=' "$ENV_FILE"; then
   fail "a new server should need only DOMAIN, but compose/.env sets the hostnames above"
 fi

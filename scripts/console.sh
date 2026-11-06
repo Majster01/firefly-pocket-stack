@@ -51,6 +51,12 @@
 #       {"action": "healthchecks", "code": "...", "key": "..."}
 #                        its other half: healthchecks.io's two checks made with that API
 #                        key, which is not kept, and their ping URLs kept
+#       {"action": "backups", "code": "...", "repository": "...", "access_key_id": "...",
+#        "secret_access_key": "...", "mode": "new" or "existing", "password": "..."}
+#                        the wizard's backups step (backups.sh): a new repository made with
+#                        the password the console showed you to keep, or one restic uses
+#                        already opened with its password (empty: this server's). Empty S3
+#                        keys keep the server's. All of it kept once the repository opens
 #       {"action": "finish", "code": "..."}
 #                        the end of setup: the code is removed, and the console starts
 #                        again without it
@@ -58,8 +64,9 @@
 #                        timezone, whether Firefly III has its account and whether setup is
 #                        finished, the bank step's certificate, application ID and redirect
 #                        URLs, the last four characters of each key and topic kept, the
-#                        model, whether the checks are made, and what became of the last 20
-#                        requests. No secret.
+#                        model, whether the checks are made, the backup's repository (any
+#                        password in it hidden) and whether restic is installed, and what
+#                        became of the last 20 requests. No secret.
 #
 # apply runs under the lock the deploy and the cron jobs take, one request after
 # another in the order the console wrote them.
@@ -86,6 +93,8 @@ source "$REPO_ROOT/scripts/bank.sh"
 source "$REPO_ROOT/scripts/suggestions.sh"
 # shellcheck source=alerts.sh
 source "$REPO_ROOT/scripts/alerts.sh"
+# shellcheck source=backups.sh
+source "$REPO_ROOT/scripts/backups.sh"
 
 # Compose takes a variable from its environment over compose/.env, and lib.sh
 # exports every value .env has. So nothing that ran this (a shell that sourced
@@ -185,15 +194,22 @@ last4() {
   [ -z "$value" ] || printf '…%s' "${value: -4}"
 }
 
-# The suggestions and alerts steps': what is kept, a secret only by its last four.
+# The suggestions, alerts and backups steps': what is kept, a secret only by its
+# last four.
 extras_json() {
-  local checks=false
+  local checks=false restic=false repository
   [ -z "$(env_value HEALTHCHECK_NIGHTLY_URL)" ] || [ -z "$(env_value HEALTHCHECK_BACKUP_URL)" ] || checks=true
+  ! command -v restic >/dev/null 2>&1 || restic=true
+  repository="$(env_value RESTIC_REPOSITORY)"
+  [ -z "$repository" ] || repository="$(restic_shown "$repository")"
   jq -nc --arg anthropic "$(last4 ANTHROPIC_API_KEY)" --arg gemini "$(last4 GEMINI_API_KEY)" \
     --arg model "$(stored SUGGESTER_MODEL)" --arg default "$SUGGESTER_DEFAULT_MODEL" \
-    --arg ntfy "$(last4 NTFY_URL)" --argjson checks "$checks" '
+    --arg ntfy "$(last4 NTFY_URL)" --argjson checks "$checks" \
+    --arg repository "$repository" --arg key_id "$(last4 AWS_ACCESS_KEY_ID)" \
+    --arg secret_key "$(last4 AWS_SECRET_ACCESS_KEY)" --argjson restic "$restic" '
     { suggestions: {anthropic: $anthropic, gemini: $gemini, model: (if $model == "" then $default else $model end)},
-      alerts: {ntfy: $ntfy, healthchecks: $checks} }'
+      alerts: {ntfy: $ntfy, healthchecks: $checks},
+      backups: {repository: $repository, access_key_id: $key_id, secret_access_key: $secret_key, restic: $restic} }'
 }
 
 write_status() {
@@ -216,7 +232,7 @@ write_status() {
       settings: {DOMAIN: $domain, SITE_OWNER: $owner, LEGAL_OWNER_NAME: $name, TZ: $tz, ADMIN_HOSTNAME: $admin},
       host_timezone: $host_tz, addresses: {v4: $v4, v6: $v6}, names: $derived.names,
       bank: ($bank + {redirect_urls: $derived.redirect_urls}),
-      suggestions: $extras.suggestions, alerts: $extras.alerts,
+      suggestions: $extras.suggestions, alerts: $extras.alerts, backups: $extras.backups,
       requests: ($old + $new | to_entries | sort_by(.value.at) | .[-20:] | from_entries) }' > "$tmp"
   chmod 644 "$tmp"
   mv -f "$tmp" "$STATUS"
@@ -243,7 +259,7 @@ apply_one() {
   fi
   ACTION="$(jq -r 'if type == "object" and (.action | type) == "string" then .action else "" end' <"$file" 2>/dev/null || true)"
   case "$ACTION" in
-    server | account | bank_key | bank | suggestions | ntfy | ntfy_test | healthchecks | finish) ;;
+    server | account | bank_key | bank | suggestions | ntfy | ntfy_test | healthchecks | backups | finish) ;;
     *)
       ACTION=""
       result "$id" refused "Not a request this version of the server knows."
@@ -532,6 +548,96 @@ apply_healthchecks() {
     hc_ping "$url" "set up by the Firefly Pocket Console" || true
   done
   result "$id" applied "Both checks are made on healthchecks.io, the nightly import's and the backup's, with their schedules in ${tz:-Etc/UTC}. It mails you when either does not report in on time. The API key is not kept."
+  return 1
+}
+
+# apply_backups <id> <file>: 1, always: nothing to start again; the nightly
+# backup reads compose/.env when it runs. Runs restic itself: the agent's user
+# is the one the nightly backup runs as.
+# shellcheck disable=SC1111  # typographic quotes, in what the console shows
+apply_backups() {
+  local id="$1" file="$2" repository key_id secret mode password out
+  repository="$(string_of "$file" repository)"
+  key_id="$(string_of "$file" access_key_id)"
+  secret="$(string_of "$file" secret_access_key)"
+  mode="$(string_of "$file" mode)"
+  password="$(string_of "$file" password)"
+  # Only the shape the console writes; a new repository's password is one it made.
+  if [ -z "$repository" ] || { [ "$mode" != new ] && [ "$mode" != existing ]; } \
+    || { [ "$mode" = new ] && [ "${#password}" -lt 16 ]; }; then
+    result "$id" refused "Not a request this version of the server knows."
+    return 1
+  fi
+  if ! out="$("$FP" config check RESTIC_REPOSITORY - 2>&1 <<<"$repository")"; then
+    result "$id" refused "Not a repository: ${out#*: }."
+    return 1
+  fi
+  if ! command -v restic >/dev/null 2>&1; then
+    result "$id" refused "restic is not installed on this server. On the server: sudo apt-get install -y restic, then save this again."
+    return 1
+  fi
+  if [[ "$repository" == s3:* ]]; then
+    key_id="${key_id:-$(env_value AWS_ACCESS_KEY_ID)}"
+    secret="${secret:-$(env_value AWS_SECRET_ACCESS_KEY)}"
+    if [ -z "$key_id" ] || [ -z "$secret" ]; then
+      result "$id" refused "S3 storage needs its access key ID and secret access key."
+      return 1
+    fi
+    if ! "$FP" config check AWS_ACCESS_KEY_ID - <<<"$key_id" >/dev/null 2>&1 \
+      || ! "$FP" config check AWS_SECRET_ACCESS_KEY - <<<"$secret" >/dev/null 2>&1; then
+      result "$id" refused "Not an S3 key: no spaces in either."
+      return 1
+    fi
+  else
+    key_id="" secret=""
+  fi
+  password="${password:-$(env_value RESTIC_PASSWORD)}"
+  if [ -z "$password" ]; then
+    result "$id" refused "The repository's password is needed."
+    return 1
+  fi
+  result "$id" running "Opening the repository."
+  write_status
+  restic_open "$repository" "$password" "$key_id" "$secret"
+  case "$RESTIC_STATE:$mode" in
+    open:*) out="Saved: the repository opens, with $RESTIC_SNAPSHOTS snapshots in it." ;;
+    wrong_password:new)
+      result "$id" refused "A restic repository is there already, with another password. To back up to it, choose “One restic uses already” and give its password."
+      return 1
+      ;;
+    wrong_password:existing)
+      result "$id" refused "That is not the repository's password: restic says “wrong password or no key found”."
+      return 1
+      ;;
+    missing:existing)
+      result "$id" refused "Nothing is there yet. To make a repository there, choose “A new repository”."
+      return 1
+      ;;
+    missing:new)
+      result "$id" running "Making the repository."
+      write_status
+      if ! restic_make "$repository" "$password" "$key_id" "$secret"; then
+        result "$id" refused "restic could not make it: $RESTIC_PROBLEM"
+        return 1
+      fi
+      out="Saved: restic made the repository, with the password you kept."
+      ;;
+    *)
+      result "$id" refused "restic cannot open it: $RESTIC_PROBLEM"
+      return 1
+      ;;
+  esac
+  local message="$out"
+  out=""
+  if ! { "$FP" config set --no-render RESTIC_REPOSITORY - <<<"$repository" >/dev/null 2>&1 \
+         && keep RESTIC_PASSWORD "$password" \
+         && { [ -z "$key_id" ] || { keep AWS_ACCESS_KEY_ID "$key_id" && keep AWS_SECRET_ACCESS_KEY "$secret"; }; } \
+         && out="$("$FP" config render 2>&1)"; }; then
+    result "$id" failed "The repository opens, but the settings store did not take it: ${out:-config set failed}"
+    return 1
+  fi
+  password="" secret=""
+  result "$id" applied "$message The nightly backup, at 02:00, copies to it from its next run."
   return 1
 }
 

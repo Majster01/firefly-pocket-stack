@@ -447,13 +447,15 @@ class ConsoleTest(unittest.TestCase):
         self.assertNotIn(b'http-equiv="refresh"', page)
 
     # ------------------------------------------------- the steps in order ---
-    def bank_status(self, requests=None, suggestions=None, alerts=None, **bank):
+    def bank_status(self, requests=None, suggestions=None, alerts=None, backups=None, **bank):
         state = {"key": False, "certificate": "", "app_id": "",
                  "redirect_urls": ["https://app.fx.example.com/eb-callback", "https://import.fx.example.com/eb-callback"]}
         state.update(bank)
         self.account_status(account=True, setup_done=False, bank=state, requests=requests or {},
                             suggestions=suggestions or {"anthropic": "", "gemini": "", "model": "claude-haiku-5-5"},
                             alerts=alerts or {"ntfy": "", "healthchecks": False},
+                            backups=backups or {"repository": "", "access_key_id": "", "secret_access_key": "",
+                                                "restic": True},
                             names=[{"role": "admin", "host": HOST}, {"role": "firefly", "host": "firefly.fx.example.com"},
                                    {"role": "app", "host": "app.fx.example.com"},
                                    {"role": "legal", "host": "legal.fx.example.com"}])
@@ -596,7 +598,7 @@ class ConsoleTest(unittest.TestCase):
         cookie = self.sign_in()
         page = self.call("GET", "/finish", cookie=cookie).body.decode()
         for want in (f"the application <code>{APP_ID}</code>", "fx.example.com", "https://firefly.fx.example.com",
-                     "<code>updates</code>", "nothing runs on a schedule", 'action="/finish"'):
+                     "setup updates</code>", "nothing runs on a schedule", 'action="/finish"'):
             self.assertIn(want, page)
         location, request = self.request_of(self.call("POST", "/finish", "", cookie=cookie))
         self.assertEqual({k: request[k] for k in ("action", "code")}, {"action": "finish", "code": "7K2MQ9TB0XH4PVRA"})
@@ -619,7 +621,10 @@ class ConsoleTest(unittest.TestCase):
         for extra, where in (({}, "/bank"), ({"app_id": APP_ID}, "/suggestions"),
                              ({"app_id": APP_ID, "suggestions": {"anthropic": "…wxyz", "model": "claude-haiku-5-5"}}, "/alerts"),
                              ({"app_id": APP_ID, "suggestions": {"anthropic": "…wxyz", "model": "claude-haiku-5-5"},
-                               "alerts": {"ntfy": "…abcd", "healthchecks": False}}, "/finish")):
+                               "alerts": {"ntfy": "…abcd", "healthchecks": False}}, "/backups"),
+                             ({"app_id": APP_ID, "suggestions": {"anthropic": "…wxyz", "model": "claude-haiku-5-5"},
+                               "alerts": {"ntfy": "…abcd", "healthchecks": False},
+                               "backups": {"repository": "/srv/restic", "restic": True}}, "/finish")):
             self.bank_status(**extra)
             self.assertEqual(dict(self.call("POST", "/login", f"code={CODE}").headers)["Location"], where, extra)
 
@@ -715,10 +720,112 @@ class ConsoleTest(unittest.TestCase):
         self.assertIn("Anthropic's key, <code>…wxyz</code>, for <code>claude-haiku-5-5</code>", page)
         self.assertIn("ntfy, <code>…3xq1</code>, and healthchecks.io's two checks", page)
         self.assertNotIn("<code>suggestions</code>:", page)
-        self.assertIn("<code>backups</code>", page)
+        self.assertIn("scripts/firefly-pocket setup backups", page)
+        self.assertIn('<a href="/backups">Backups</a>', page)
         for name in ("Server", "Firefly III account", "Bank connection", "Suggestions", "Alerts"):
             self.assertIn(f'<li class="done"><a href=', page)
             self.assertRegex(page, rf'<li class="done"><a href="/[a-z]+">{name}</a>')
+
+    # ------------------------------------------------------------ backups ---
+    def shown_password(self, page: str) -> str:
+        match = re.search(r'<p class="password"><code>([A-Za-z0-9]+)</code></p>', page)
+        self.assertIsNotNone(match, page[:2000])
+        self.assertIn(f'name="new_password" value="{match.group(1)}"', page)
+        return match.group(1)
+
+    def test_backups_page(self):
+        self.bank_status()
+        cookie = self.sign_in()
+        page = self.call("GET", "/backups", cookie=cookie).body.decode()
+        for want in ('aria-current="step">Backups', 'name="mode" value="new" checked', 'name="saved" value="yes"',
+                     "Skip it for now", "setup backups", 'name="secret_access_key" type="password"'):
+            self.assertIn(want, page)
+        self.assertNotIn("not installed", page)
+        self.assertNotRegex(page, r'name="secret_access_key"[^>]*required')  # for S3 only
+        self.assertRegex(page, r'name="repository"[^>]*placeholder="s3:https://')
+        password = self.shown_password(page)
+        self.assertEqual(len(password), 32)
+        # The same until the server has made a repository with it.
+        self.assertEqual(self.shown_password(self.call("GET", "/backups", cookie=cookie).body.decode()), password)
+        self.bank_status(backups={"repository": "s3:https://s3.example.com/bucket/fp", "access_key_id": "…KEY1",
+                                  "secret_access_key": "…cret", "restic": True})
+        page = self.call("GET", "/backups", cookie=cookie).body.decode()
+        for want in ("backs up to <code>s3:https://s3.example.com/bucket/fp</code>", "Another repository, or new keys",
+                     'value="s3:https://s3.example.com/bucket/fp"', 'name="mode" value="existing" checked',
+                     "Empty keeps this server&#x27;s, …cret.", "<code>…KEY1</code>", "Next: Finish"):
+            self.assertIn(want, page)
+        self.assertNotIn("Skip it for now", page)
+        self.bank_status(backups={"repository": "rest:https://me:…@backup.example.com/", "restic": False})
+        page = self.call("GET", "/backups", cookie=cookie).body.decode()
+        self.assertIn("restic is not installed on this server", page)
+        self.assertNotIn('value="rest:https://me:…@backup.example.com/"', page)  # not sent back with the … in it
+
+    def test_backups_refuses_what_cannot_be_right(self):
+        self.bank_status()
+        cookie = self.sign_in()
+        password = self.shown_password(self.call("GET", "/backups", cookie=cookie).body.decode())
+        s3 = "repository=s3%3Ahttps%3A%2F%2Fs3.example.com%2Fb%2Ffp"
+        for form, text in (("repository=&mode=existing&password=x", "A restic repository, without spaces"),
+                           ("repository=a+b&mode=existing&password=x", "A restic repository, without spaces"),
+                           (f"{s3}&mode=existing&password=x", "S3 needs it"),
+                           (f"{s3}&access_key_id=a+b&secret_access_key=c&mode=existing&password=x", "No spaces"),
+                           (f"repository=%2Fsrv%2Frestic&mode=new&new_password={password}", "Keep it first"),
+                           ("repository=%2Fsrv%2Frestic&mode=new&new_password=short&saved=yes", "not one this page made"),
+                           ("repository=%2Fsrv%2Frestic&mode=existing&password=", "Its password"),
+                           ("repository=%2Fsrv%2Frestic&mode=existing&password=a%01b", "No control characters"),
+                           ("repository=%2Fsrv%2Frestic&mode=both", "A new repository, or one restic uses already")):
+            resp = self.call("POST", "/backups", form, cookie=cookie)
+            self.assertEqual(resp.status, 400, form)
+            self.assertIn(text, resp.body.decode(), form)
+        self.assertEqual(self.requests(), [])
+        # The page after an error shows the password it showed before.
+        self.assertIn(f"<code>{password}</code>", resp.body.decode())
+
+    def test_backups_hands_requests_to_the_agent(self):
+        self.bank_status()
+        cookie = self.sign_in()
+        password = self.shown_password(self.call("GET", "/backups", cookie=cookie).body.decode())
+        location, request = self.request_of(self.call(
+            "POST", "/backups", f"repository=%2Fsrv%2Frestic&mode=new&new_password={password}&saved=yes", cookie=cookie))
+        self.assertEqual({k: request[k] for k in ("action", "repository", "mode", "password", "access_key_id",
+                                                   "secret_access_key")},
+                         {"action": "backups", "repository": "/srv/restic", "mode": "new", "password": password,
+                          "access_key_id": "", "secret_access_key": ""})
+        rid = location.rsplit("/", 1)[1]
+        # Refused: the same password, to keep, next time too.
+        self.bank_status(requests={rid: {"state": "refused", "action": "backups", "at": "2026-11-06T12:00:00Z",
+                                         "message": "restic could not make it: permission denied"}})
+        page = self.call("GET", location, cookie=cookie).body.decode()
+        self.assertIn("permission denied", page)
+        self.assertIn('href="/backups"', page)
+        self.assertEqual(self.shown_password(self.call("GET", "/backups", cookie=cookie).body.decode()), password)
+        location, _ = self.request_of(self.call(
+            "POST", "/backups", f"repository=%2Fsrv%2Frestic&mode=new&new_password={password}&saved=yes", cookie=cookie))
+        rid = location.rsplit("/", 1)[1]
+        # Made: the password is not shown again.
+        self.bank_status(requests={rid: {"state": "applied", "action": "backups", "at": "2026-11-06T12:01:00Z",
+                                         "message": "Saved: restic made the repository, with the password you kept."}},
+                         backups={"repository": "/srv/restic", "restic": True})
+        page = self.call("GET", location, cookie=cookie).body.decode()
+        self.assertIn("Next: Finish", page)
+        self.assertNotIn(password, page)
+        self.assertNotIn(password, self.call("GET", "/backups", cookie=cookie).body.decode())
+        # One restic uses already, S3 with the server's keys: an empty password is this server's.
+        self.bank_status(backups={"repository": "s3:https://s3.example.com/b/fp", "access_key_id": "…KEY1",
+                                  "secret_access_key": "…cret", "restic": True})
+        _, request = self.request_of(self.call(
+            "POST", "/backups", "repository=s3%3Ahttps%3A%2F%2Fs3.example.com%2Fb%2Fother&mode=existing&password=",
+            cookie=cookie))
+        self.assertEqual({k: request[k] for k in ("repository", "mode", "password", "access_key_id", "secret_access_key")},
+                         {"repository": "s3:https://s3.example.com/b/other", "mode": "existing", "password": "",
+                          "access_key_id": "", "secret_access_key": ""})
+
+    def test_finish_lists_backups(self):
+        self.bank_status(backups={"repository": "s3:https://s3.example.com/b/fp", "restic": True})
+        page = self.call("GET", "/finish", cookie=self.sign_in()).body.decode()
+        self.assertIn("each night to <code>s3:https://s3.example.com/b/fp</code>", page)
+        self.assertNotIn("setup backups", page)
+        self.assertRegex(page, r'<li class="done"><a href="/backups">Backups</a>')
 
     def test_no_code(self):
         resp = self.call("GET", "/", app=self.make(code=""))

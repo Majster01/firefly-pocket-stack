@@ -26,6 +26,7 @@
 #   alerts       an ntfy topic made here and tested; healthchecks.io checks made with its API key
 #                (alerts.sh)
 #   backups      a restic repository, opened or created; its password shown to keep
+#                (backups.sh, which the console's backups step uses too)
 #   updates      the deploy agent (scripts/install-deploy-agent.sh), which keeps this
 #                server on master and installs the nightly jobs
 #   finish       ends setup web's setup code, if there is one (below)
@@ -40,11 +41,11 @@
 # III has its account, every name then shows only the console, at
 # https://admin.<domain>, which asks for that code (the Caddyfile's setup gate).
 # Its pages are the domain and you steps, then the account and start steps, then
-# the bank, suggestions and alerts steps; backups and updates are this wizard's
-# for now. The code works until setup
-# finishes: the console's Finish, or this wizard's full run or finish step, ends
-# it. What the console saves, scripts/console.sh applies: setup web installs the
-# systemd unit that runs it, unless FIREFLY_POCKET_NO_SYSTEMD is set (CI).
+# the bank, suggestions, alerts and backups steps; updates is this wizard's for
+# now. The code works until setup finishes: the console's Finish, or this
+# wizard's full run or finish step, ends it. What the console saves,
+# scripts/console.sh applies: setup web installs the systemd unit that runs it,
+# unless FIREFLY_POCKET_NO_SYSTEMD is set (CI).
 
 set -euo pipefail
 shopt -s inherit_errexit
@@ -68,6 +69,8 @@ source "$REPO_ROOT/scripts/bank.sh"
 source "$REPO_ROOT/scripts/suggestions.sh"
 # shellcheck source=alerts.sh
 source "$REPO_ROOT/scripts/alerts.sh"
+# shellcheck source=backups.sh
+source "$REPO_ROOT/scripts/backups.sh"
 
 # Answers come from the terminal, or else from stdin, which then moves to fd 3:
 # no command the wizard runs can read an answer meant for a later question.
@@ -648,13 +651,17 @@ step_alerts() {
 }
 
 # -------------------------------------------------------------- backups ---
+# restic_password_note <password>
 restic_password_note() {
   say "" "Keep the repository's password off this server, in your password manager: without it" \
       "nobody can read the offsite copy, you included, once this server is gone." \
-      "    $RESTIC_PASSWORD"
+      "    $1"
   ask "Saved it? Enter to go on"
 }
 
+# The repository, its S3 keys and its password are kept once it opens, as the
+# console's step keeps them (console.sh): nothing that does not work replaces
+# what does.
 step_backups() {
   heading "Offsite backups"
   reload
@@ -662,9 +669,10 @@ step_backups() {
       "repository also offsite. Without one, losing this server loses everything. S3 storage" \
       "(Backblaze B2, Hetzner Object Storage, AWS) also needs its access key. Such as" \
       "    s3:https://s3.eu-central-003.backblazeb2.com/your-bucket/firefly-pocket"
-  local repo="${RESTIC_REPOSITORY:-}" out
+  local enter="Enter to skip" repo key_id secret password made
+  [ -z "${RESTIC_REPOSITORY:-}" ] || enter="Enter keeps it"
   while :; do
-    ask "restic repository (Enter to skip)" "$repo"
+    ask "restic repository ($enter)" "${RESTIC_REPOSITORY:-}"
     if [ -z "$ANSWER" ]; then
       say "Skipped: scripts/firefly-pocket setup backups, any time."
       SKIPPED+=("offsite backups: scripts/firefly-pocket setup backups")
@@ -675,46 +683,76 @@ step_backups() {
       SKIPPED+=("offsite backups: scripts/firefly-pocket setup backups")
       return 0
     fi
-    "$FP" config check RESTIC_REPOSITORY "$ANSWER" 2>/dev/null || { problem "one word, without spaces"; continue; }
-    put RESTIC_REPOSITORY "$ANSWER" || continue
-    repo="$ANSWER"
+    "$FP" config check RESTIC_REPOSITORY - <<<"$ANSWER" >/dev/null 2>&1 || { problem "one word, without spaces"; continue; }
+    repo="$ANSWER" key_id="" secret="" password="$RESTIC_PASSWORD" made=""
     if [[ "$repo" == s3:* ]]; then
-      until ask_setting AWS_ACCESS_KEY_ID "Access key ID" "${AWS_ACCESS_KEY_ID:-}"; do problem "S3 needs it"; done
+      while :; do
+        ask "Access key ID" "${AWS_ACCESS_KEY_ID:-}"
+        key_id="$ANSWER"
+        [ -n "$key_id" ] || { problem "S3 needs it"; continue; }
+        "$FP" config check AWS_ACCESS_KEY_ID - <<<"$key_id" >/dev/null 2>&1 && break
+        problem "no spaces"
+      done
       while :; do
         ask_secret "Secret access key${AWS_SECRET_ACCESS_KEY:+ (Enter keeps ...${AWS_SECRET_ACCESS_KEY: -4})}"
-        [ -n "$ANSWER" ] || { [ -n "${AWS_SECRET_ACCESS_KEY:-}" ] && break; problem "S3 needs it"; continue; }
-        put AWS_SECRET_ACCESS_KEY "$ANSWER" && break
+        secret="${ANSWER:-${AWS_SECRET_ACCESS_KEY:-}}"
+        ANSWER=""
+        [ -n "$secret" ] || { problem "S3 needs it"; continue; }
+        "$FP" config check AWS_SECRET_ACCESS_KEY - <<<"$secret" >/dev/null 2>&1 && break
+        problem "no spaces"
       done
     fi
-    reload
-    # restic reads RESTIC_REPOSITORY, RESTIC_PASSWORD and the AWS keys from the
-    # environment, as lib.sh exported them from .env.
-    if out="$(timeout 120 restic cat config 2>&1)"; then
-      ok "the repository opens: $(timeout 120 restic snapshots --json 2>/dev/null | jq length 2>/dev/null || echo "?") snapshots in it"
-      return 0
-    fi
-    if grep -qiE 'wrong password|no key found' <<<"$out"; then
-      problem "that repository has another password than the one made here"
-      ask_secret "Its password (Enter to give up)"
-      if [ -n "$ANSWER" ] && put RESTIC_PASSWORD "$ANSWER"; then
-        ANSWER=""
-        continue
-      fi
-      ANSWER=""
-      SKIPPED+=("offsite backups: scripts/firefly-pocket setup backups")
-      return 0
-    elif grep -qiE 'does not exist|Is there a repository|unable to open config' <<<"$out"; then
-      if confirm "Nothing is there yet. Make a restic repository there?" y; then
-        if out="$(timeout 300 restic init 2>&1)"; then
-          ok "repository made"
-          restic_password_note
+    restic_open "$repo" "$password" "$key_id" "$secret"
+    case "$RESTIC_STATE" in
+      open) ;;
+      wrong_password)
+        problem "that repository has another password than the one this server has"
+        while [ "$RESTIC_STATE" != open ]; do
+          ask_secret "Its password (Enter to give up)"
+          password="$ANSWER"
+          ANSWER=""
+          [ -n "$password" ] || break
+          restic_open "$repo" "$password" "$key_id" "$secret"
+          case "$RESTIC_STATE" in
+            open) ;;
+            wrong_password) problem "not that one either" ;;
+            *) problem "restic cannot open it now: ${RESTIC_PROBLEM:-it says nothing is there}" ;;
+          esac
+        done
+        if [ -z "$password" ]; then
+          say "Nothing kept: scripts/firefly-pocket setup backups, any time."
+          SKIPPED+=("offsite backups: scripts/firefly-pocket setup backups")
           return 0
         fi
-        problem "restic init failed: $(tail -n 2 <<<"$out")"
-      fi
-    else
-      problem "restic cannot open it: $(tail -n 3 <<<"$out" | cut -c1-300)"
+        ;;
+      missing)
+        confirm "Nothing is there yet. Make a restic repository there?" y || continue
+        if ! restic_make "$repo" "$password" "$key_id" "$secret"; then
+          problem "restic init failed: $RESTIC_PROBLEM"
+          continue
+        fi
+        made=1
+        ;;
+      *)
+        problem "restic cannot open it: $RESTIC_PROBLEM"
+        continue
+        ;;
+    esac
+    { put RESTIC_REPOSITORY "$repo" && put RESTIC_PASSWORD "$password"; } \
+      || die "the repository opens, but the settings store did not take it"
+    if [ -n "$key_id" ]; then
+      { put AWS_ACCESS_KEY_ID "$key_id" && put AWS_SECRET_ACCESS_KEY "$secret"; } \
+        || die "the repository opens, but the settings store did not take its S3 keys"
     fi
+    secret=""
+    if [ -n "$made" ]; then
+      ok "repository made"
+      restic_password_note "$password"
+    else
+      ok "the repository opens: $RESTIC_SNAPSHOTS snapshots in it"
+    fi
+    password=""
+    return 0
   done
 }
 
@@ -795,7 +833,7 @@ case "${1:-}" in
     step_web
     ;;
   *)
-    sed -n '3,45s/^# \{0,1\}//p' "${BASH_SOURCE[0]}" >&2
+    sed -n '3,48s/^# \{0,1\}//p' "${BASH_SOURCE[0]}" >&2
     exit 2
     ;;
 esac
