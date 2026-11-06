@@ -326,12 +326,11 @@ services:
       # the fork. Links started in the importer's own UI keep coming back to
       # its host. The user then lands back in Firefly Pocket, on its
       # /bank-connections pages — the only place the callback ever redirects
-      # to. The fork still calls that setting FIREFLYX_PICO_URL; Hostnames and
-      # routing step 5 renames it.
+      # to.
       FIREFLY_POCKET_CALLBACK_URL: https://${NEXT_HOSTNAME}/eb-callback
-      # The old name, for importer builds older than the new one. Drop it
-      # with step 5.
-      FIREFLYX_CALLBACK_URL: https://${NEXT_HOSTNAME}/eb-callback
+      FIREFLY_POCKET_APP_URL: https://${NEXT_HOSTNAME}
+      # The old name of FIREFLY_POCKET_APP_URL, for importer builds before
+      # Majster01/data-importer eb731d7. Hostnames and routing step 6 drops it.
       FIREFLYX_PICO_URL: https://${NEXT_HOSTNAME}
       # Banks book late; duplicate detection discards the overlap.
       FIREFLYX_LOOKBACK_DAYS: ${IMPORT_LOOKBACK_DAYS:-5}
