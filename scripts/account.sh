@@ -111,4 +111,24 @@ make_tokens() {
   done
   registration closed || die "Firefly III's /register still shows its form"
   ok "/register is closed: no one else can make an account"
+  console_client
+}
+
+# console_client: the console's "Sign in with Firefly III" client, registered
+# inside Firefly III, or moved to this domain's redirect URL, and its ID kept
+# as CONSOLE_CLIENT_ID. Public: the console holds no secret (firefly-bootstrap.php).
+CONSOLE_CLIENT_NAME="Firefly Pocket Console"
+console_client() {
+  local answer id
+  answer="$(jq -nc --arg name "$CONSOLE_CLIENT_NAME" --arg redirect "https://$ADMIN_HOSTNAME/oauth/callback" \
+    '{client: {name: $name, redirect: $redirect}}' | bootstrap)"
+  id="$(jq -r '.client.id // empty' <<<"$answer")"
+  [ -n "$id" ] || die "Firefly III registered no client for the console"
+  if [ "$id" != "${CONSOLE_CLIENT_ID:-}" ]; then
+    "$FP" config set --no-render CONSOLE_CLIENT_ID - <<<"$id" >/dev/null || die "CONSOLE_CLIENT_ID does not take $id"
+    "$FP" config render >/dev/null
+    # shellcheck source=lib.sh
+    source "$REPO_ROOT/scripts/lib.sh"
+  fi
+  ok "the console signs in with Firefly III: its client, $id, is $(jq -r '.client.client' <<<"$answer")"
 }

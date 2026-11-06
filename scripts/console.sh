@@ -6,6 +6,10 @@
 #     scripts/firefly-pocket console status    write its status only
 #     scripts/firefly-pocket console install   the systemd units that run apply as soon as the
 #                                              console saves something (uses sudo)
+#     scripts/firefly-pocket console client    the console's "Sign in with Firefly III" client,
+#                                              registered in Firefly III (account.sh); with
+#                                              --if-missing, only when there is none yet, as
+#                                              the deploy runs it
 #
 # The console (services/console) runs in a container that holds no secret but
 # the setup code and cannot reach Docker. It can add files to
@@ -72,8 +76,9 @@
 #                        URLs, the last four characters of each key and topic kept, the
 #                        model, whether the checks are made, the backup's repository (any
 #                        password in it hidden) and whether restic is installed, whether the
-#                        deploy agent is on and the repository it follows, and what became
-#                        of the last 20 requests. No secret.
+#                        deploy agent is on and the repository it follows, the console's
+#                        OAuth client ID (public), and what became of the last 20 requests.
+#                        No secret.
 #
 # apply runs under the lock the deploy and the cron jobs take, one request after
 # another in the order the console wrote them.
@@ -245,12 +250,13 @@ write_status() {
         --arg name "$(stored LEGAL_OWNER_NAME)" --arg tz "$(stored TZ)" --arg admin "$(stored ADMIN_HOSTNAME)" \
         --arg host_tz "$(host_timezone)" --arg v4 "$(my_address 4)" --arg v6 "$(my_address 6)" \
         --argjson derived "$(names_json)" --argjson bank "$(bank_json)" --argjson extras "$(extras_json)" \
-        --argjson old "$old" --argjson new "$RESULTS" '
+        --arg client_id "$(stored CONSOLE_CLIENT_ID)" --argjson old "$old" --argjson new "$RESULTS" '
     { written: $written, account: $account, setup_done: $finished,
       settings: {DOMAIN: $domain, SITE_OWNER: $owner, LEGAL_OWNER_NAME: $name, TZ: $tz, ADMIN_HOSTNAME: $admin},
       host_timezone: $host_tz, addresses: {v4: $v4, v6: $v6}, names: $derived.names,
       bank: ($bank + {redirect_urls: $derived.redirect_urls}),
       suggestions: $extras.suggestions, alerts: $extras.alerts, backups: $extras.backups, updates: $extras.updates,
+      signin: {client_id: $client_id},
       requests: ($old + $new | to_entries | sort_by(.value.at) | .[-20:] | from_entries) }' > "$tmp"
   chmod 644 "$tmp"
   mv -f "$tmp" "$STATUS"
@@ -781,6 +787,19 @@ cmd_bank() {
   echo "DONE: Saved: Enable Banking accepts a request signed with this server's key for $(eb_about). ${notes:+$notes }Link a bank from Firefly Pocket: Bank connections."
 }
 
+# console.sh client [--if-missing]: the console's sign-in client (account.sh),
+# once Firefly III has its account; then the status, which carries its ID.
+cmd_client() {
+  account_made || die "Firefly III has no account yet: the account step registers the client"
+  [ "${1:-}" != --if-missing ] || [ -z "$(stored CONSOLE_CLIENT_ID)" ] || return 0
+  # shellcheck source=lib.sh
+  source "$REPO_ROOT/scripts/lib.sh"
+  # shellcheck source=account.sh
+  source "$REPO_ROOT/scripts/account.sh"
+  console_client
+  write_status
+}
+
 cmd_apply() {
   console_dirs
   exec 9>"$LOCK_FILE"
@@ -859,12 +878,13 @@ case "${1:-}" in
   apply) cmd_apply ;;
   status) write_status ;;
   install) cmd_install ;;
+  client) cmd_client "${2:-}" ;;
   _account) cmd_account "${2:?}" ;;
   _bank_key) cmd_bank_key ;;
   _bank) cmd_bank "${2:?}" ;;
   _names) cmd_names ;;
   *)
-    sed -n '3,9s/^# \{0,1\}//p' "${BASH_SOURCE[0]}" >&2
+    sed -n '3,13s/^# \{0,1\}//p' "${BASH_SOURCE[0]}" >&2
     exit 2
     ;;
 esac

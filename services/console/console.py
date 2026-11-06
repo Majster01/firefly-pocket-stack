@@ -20,6 +20,12 @@ updates: the deploy agent, which keeps the server on master and runs the
 nightly jobs. Saved keys are write-only: this shows their last four
 characters. Finish lists what each step left, and ends the setup code.
 
+After setup (Setup UI step 8) it signs you in with Firefly III instead: an
+authorization code with PKCE, for the public client the server registers in
+Firefly III, so Firefly III's password and its two-factor authentication
+apply. Only the account the server was set up for, SITE_OWNER, gets in. Then
+it shows what the server has; changing a step here comes next.
+
 It is built so that taking it over gains little:
 
 - It never touches Docker or the settings. Save turns into a request file in
@@ -32,8 +38,10 @@ It is built so that taking it over gains little:
   is made here and kept in memory only until the server has made the
   repository with it.
 - The setup code works only until setup is finished, when the server removes
-  it and starts this again without it. After that the console only says where
-  things are, and the agent refuses its requests too.
+  it and starts this again without it. After that only a sign-in with Firefly
+  III opens it, and the agent refuses its requests. It holds no client secret:
+  the client is public, and PKCE stands in for one. Firefly III's token stays
+  in memory for the session, which lasts 8 hours, and in no file.
 - It shares a network with Caddy only, not with the apps or Postgres.
 
 Standard library only: compose runs it on the stock python image, with this
@@ -42,8 +50,11 @@ directory mounted read-only, as an unprivileged user on a read-only root.
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import hmac
 import html
+import http.client
 import json
 import os
 import re
@@ -60,12 +71,15 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs, urlencode, urlsplit
 
 HERE = Path(__file__).resolve().parent
 LETS_ENCRYPT = "https://acme-v02.api.letsencrypt.org/directory"
 # __Host-: the browser keeps it to this host, over HTTPS, for every path.
 COOKIE = "__Host-console"
+# The sign-in with Firefly III under way in this browser: its state, for 10 minutes.
+SIGNIN_COOKIE = "__Host-console-signin"
+SIGNIN_SECONDS = 600
 SESSION_SECONDS = 8 * 3600
 MAX_BODY = 16 * 1024
 # Wrong codes: each costs a second, and more than this many a minute stop all
@@ -276,6 +290,51 @@ def dns_verdict(host: str, v4s: list[str], v6s: list[str], mine_v4: str, mine_v6
     return True, "points here"
 
 
+class _ThroughCaddy(http.client.HTTPSConnection):
+    """HTTPS to a name Caddy serves, on the network the two share: connected to
+    Caddy, and the TLS handshake for the name."""
+
+    def __init__(self, host: str, caddy: tuple[str, int], context: ssl.SSLContext, timeout: float):
+        super().__init__(host, caddy[1], context=context, timeout=timeout)
+        self.caddy = caddy
+
+    def connect(self) -> None:
+        sock = socket.create_connection(self.caddy, timeout=self.timeout)
+        self.sock = self._context.wrap_socket(sock, server_hostname=self.host)
+
+
+def firefly_call(caddy: tuple[str, int], method: str, host: str, path: str, form: dict | None = None,
+                 token: str = "", timeout: float = 20.0) -> tuple[int, dict]:
+    """Firefly III, through Caddy: its HTTP status and its JSON answer, or 0 and
+    {} when it did not answer. Its certificate is checked as a browser would,
+    except on *.localhost, whose certificates are Caddy's own."""
+    context = ssl.create_default_context()
+    if is_localhost(host):
+        context.check_hostname = False
+        context.verify_mode = ssl.CERT_NONE
+    headers = {"Accept": "application/vnd.api+json" if token else "application/json"}
+    body = None
+    if form is not None:
+        body = urlencode(form).encode()
+        headers["Content-Type"] = "application/x-www-form-urlencoded"
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    conn = _ThroughCaddy(host, caddy, context, timeout)
+    try:
+        conn.request(method, path, body=body, headers=headers)
+        resp = conn.getresponse()
+        status, data = resp.status, resp.read(256 * 1024)
+    except (OSError, ssl.SSLError, http.client.HTTPException):
+        return 0, {}
+    finally:
+        conn.close()
+    try:
+        answer = json.loads(data)
+    except ValueError:
+        answer = {}
+    return status, answer if isinstance(answer, dict) else {}
+
+
 def certificate(host: str, caddy: tuple[str, int], timeout: float = 5.0) -> tuple[bool, str]:
     """Whether Caddy has a trusted certificate for the name: asked directly, on
     the network the two share, and checked against the image's CA bundle."""
@@ -417,6 +476,7 @@ class Console:
         clock=time.time,
         fail_delay: float = 1.0,
         check_names=None,
+        firefly=None,
     ):
         self.code = normalize_code(code)
         self.inbox = inbox
@@ -427,9 +487,16 @@ class Console:
         self.clock = clock
         self.fail_delay = fail_delay
         self.check_names = check_names or self._check_names
+        # firefly(method, host, path, form=None, token=None) -> (status, JSON object)
+        self.firefly = firefly or (lambda *a, **k: firefly_call(self.caddy, *a, **k))
         self.css = (HERE / "console.css").read_bytes()
         self.lock = threading.Lock()
         self.sessions: dict[str, float] = {}
+        # After setup: a session signed in with Firefly III, and its token, for
+        # the agent to check (part 2). In memory only.
+        self.owner_sessions: dict[str, str] = {}
+        # A sign-in under way: state -> (PKCE verifier, until).
+        self.signins: dict[str, tuple[str, float]] = {}
         self.failures: deque[float] = deque()
         # request id: (when, its action, the host the console moves to)
         self.pending: dict[str, tuple[float, str, str]] = {}
@@ -463,7 +530,7 @@ class Console:
         # it; until then the agent refuses what this would send.
         if not self.code or (state.get("setup_done") is True and "account" in state):
             if account_made(state):
-                return self.finished(state)
+                return self.after_setup(req, state)
             return self.page(
                 503, "Not set up",
                 "<h1>This server is not set up yet</h1><p>It has no setup code either. On the server:</p>"
@@ -535,6 +602,7 @@ class Console:
     def logout(self, req: Request) -> Response:
         with self.lock:
             self.sessions.pop(req.cookie(COOKIE), None)
+            self.owner_sessions.pop(req.cookie(COOKIE), None)
         return redirect("/", [("Set-Cookie", f"{COOKIE}=; Path=/; Secure; HttpOnly; SameSite=Strict; Max-Age=0")])
 
     def login_page(self, status: int = 200, error: str = "") -> Response:
@@ -1338,55 +1406,17 @@ class Console:
   </section>
 </div>"""
             return self.page(status, "Finish", body, signed_in=True)
-        settings = part(state, "settings")
-        hosts = hosts_of(state)
-        app_id = str(part(state, "bank").get("app_id") or "")
-        firefly = hosts.get("firefly", "")
-        bank = (f"the application <code>{esc(app_id)}</code>" if app_id else
-                '<span class="bad">not yet: Firefly Pocket links no bank until it is.</span> On the server, '
-                "<code>scripts/firefly-pocket setup bank</code> does it later.")
-        kept = part(state, "suggestions")
-        keys = [f"{name}'s key, <code>{esc(kept.get(key))}</code>" for key, name in PROVIDERS.items() if kept.get(key)]
-        suggestions = (f"{' and '.join(keys)}, for <code>{esc(kept.get('model') or DEFAULT_MODEL)}</code>" if keys else
-                       '<span class="bad">not yet: no suggestions until it is.</span> '
-                       "<code>scripts/firefly-pocket setup suggestions</code> does it later.")
-        alerts_kept = part(state, "alerts")
-        alerts = [f"ntfy, <code>{esc(alerts_kept.get('ntfy'))}</code>"] if alerts_kept.get("ntfy") else []
-        if alerts_kept.get("healthchecks"):
-            alerts.append("healthchecks.io's two checks")
-        alerts_html = (", and ".join(alerts) if alerts else
-                       '<span class="bad">only the Firefly Pocket app:</span> no ntfy, and nothing tells you when this '
-                       "server is down. <code>scripts/firefly-pocket setup alerts</code> does it later.")
-        repository = str(part(state, "backups").get("repository") or "")
-        backups_html = (f"each night to <code>{esc(repository)}</code>" if repository else
-                        '<span class="bad">on this server only:</span> losing it loses everything. '
-                        "<code>scripts/firefly-pocket setup backups</code> does it later.")
-        updates_html = ("the deploy agent is on: this server follows master, and the nightly jobs run"
-                        if part(state, "updates").get("agent") is True else
-                        '<span class="bad">off: nothing runs on a schedule,</span> so no nightly import and no backup. '
-                        "<code>scripts/firefly-pocket setup updates</code> does it later.")
         body = f"""
 <div class="setup">
   {stepper(FINISH, state)}
   <section class="panel">
     <h1>Finish</h1>
     {note}
-    <table class="settings"><tbody>
-      <tr><th scope="row"><a href="/server">Server</a></th>
-          <td>{esc(settings.get("DOMAIN") or "")}, {esc(settings.get("SITE_OWNER") or "")}, {esc(settings.get("TZ") or "")}</td></tr>
-      <tr><th scope="row"><a href="/account">Firefly III account</a></th>
-          <td>made: you sign in at <code>https://{esc(firefly)}</code></td></tr>
-      <tr><th scope="row"><a href="/bank">Bank connection</a></th><td>{bank}</td></tr>
-      <tr><th scope="row"><a href="/suggestions">Suggestions</a></th><td>{suggestions}</td></tr>
-      <tr><th scope="row"><a href="/alerts">Alerts</a></th><td>{alerts_html}</td></tr>
-      <tr><th scope="row"><a href="/backups">Backups</a></th><td>{backups_html}</td></tr>
-      <tr><th scope="row"><a href="/updates">Updates</a></th><td>{updates_html}</td></tr>
-    </tbody></table>
+    {summary(state, links=True)}
     <p class="quiet">Each step was applied as you saved it. To change one, open its page; after Finish, on the server:
     <code>scripts/firefly-pocket setup &lt;step&gt;</code>.</p>
     <h2>Finish setup</h2>
-    <p>Then the setup code works no more, and this console only says where things are, until it signs in with
-    Firefly III.</p>
+    <p>Then the setup code works no more, and this console opens only to you, signed in with Firefly III.</p>
     <form method="post" action="/finish"><button type="submit">Finish setup</button></form>
   </section>
 </div>"""
@@ -1460,8 +1490,106 @@ class Console:
   if it shows an error while Caddy starts again.</p>{hint}</section>"""
         return self.page(202, working, body, refresh=3, signed_in=True)
 
-    # ----------------------------------------------------------- finished ---
-    def finished(self, state: dict) -> Response:
+    # -------------------------------------------------------- after setup ---
+    def after_setup(self, req: Request, state: dict) -> Response:
+        """Setup is finished: only Firefly III's account owner, signed in with
+        Firefly III, gets further than where things are."""
+        path = req.path
+        if path == "/signin" and req.method != "POST":
+            return self.start_signin(state)
+        if path == "/oauth/callback" and req.method != "POST":
+            return self.signin_callback(req, state)
+        if path == "/logout" and req.method == "POST":
+            return self.logout(req)
+        if not self.owner_signed_in(req):
+            return self.finished(state)
+        if path != "/":
+            return redirect("/")
+        return self.overview(state)
+
+    def owner_signed_in(self, req: Request) -> bool:
+        token = req.cookie(COOKIE)
+        with self.lock:
+            return token in self.owner_sessions and self.sessions.get(token, 0) > self.clock()
+
+    def start_signin(self, state: dict) -> Response:
+        client_id = str(part(state, "signin").get("client_id") or "")
+        hosts = hosts_of(state)
+        if not client_id or not hosts.get("firefly") or not hosts.get("admin"):
+            return self.finished(state, 503)
+        now = self.clock()
+        signin = secrets.token_urlsafe(24)
+        verifier = secrets.token_urlsafe(48)
+        challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).rstrip(b"=").decode()
+        with self.lock:
+            self.signins = {k: v for k, v in self.signins.items() if v[1] > now}
+            self.signins[signin] = (verifier, now + SIGNIN_SECONDS)
+        query = urlencode({"client_id": client_id, "redirect_uri": f"https://{hosts['admin']}/oauth/callback",
+                           "response_type": "code", "scope": "", "state": signin,
+                           "code_challenge": challenge, "code_challenge_method": "S256"})
+        # Lax: the browser comes back here from Firefly III, another host.
+        cookie = f"{SIGNIN_COOKIE}={signin}; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age={SIGNIN_SECONDS}"
+        return redirect(f"https://{hosts['firefly']}/oauth/authorize?{query}", [("Set-Cookie", cookie)])
+
+    def signin_callback(self, req: Request, state: dict) -> Response:
+        query = {k: v[0] for k, v in parse_qs(urlsplit(req.target).query, max_num_fields=10).items()}
+        given = query.get("state", "")
+        with self.lock:
+            pending = self.signins.pop(given, None) if given else None
+        clear = [("Set-Cookie", f"{SIGNIN_COOKIE}=; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=0")]
+        if not pending or pending[1] <= self.clock() or not hmac.compare_digest(given, req.cookie(SIGNIN_COOKIE)):
+            return self.not_signed_in(400, "That sign-in did not start here, or took longer than ten minutes.", clear)
+        if query.get("error"):
+            said = query.get("error_description") or query.get("error")
+            return self.not_signed_in(403, f"Firefly III said: {said}", clear)
+        client_id = str(part(state, "signin").get("client_id") or "")
+        hosts = hosts_of(state)
+        firefly = hosts.get("firefly", "")
+        status, answer = self.firefly("POST", firefly, "/oauth/token", form={
+            "grant_type": "authorization_code", "client_id": client_id,
+            "redirect_uri": f"https://{hosts.get('admin', '')}/oauth/callback",
+            "code": query.get("code", ""), "code_verifier": pending[0]})
+        access = answer.get("access_token") if status == 200 else None
+        if not isinstance(access, str) or not access:
+            return self.not_signed_in(502, f"Firefly III did not give this console a token (HTTP {status or 'no answer'}).",
+                                      clear)
+        status, about = self.firefly("GET", firefly, "/api/v1/about/user", token=access)
+        email = str(part(part(about, "data"), "attributes").get("email") or "") if status == 200 else ""
+        owner = str(part(state, "settings").get("SITE_OWNER") or "")
+        if not email:
+            return self.not_signed_in(502, f"Firefly III did not say who signed in (HTTP {status or 'no answer'}).", clear)
+        if not owner or email.casefold() != owner.casefold():
+            return self.not_signed_in(403, f"You signed in to Firefly III as {email}, and this console is only for "
+                                           f"{owner or 'the account the server was set up for'}.", clear)
+        now = self.clock()
+        session = secrets.token_urlsafe(32)
+        with self.lock:
+            self.sessions = {t: until for t, until in self.sessions.items() if until > now}
+            self.owner_sessions = {t: a for t, a in self.owner_sessions.items() if t in self.sessions}
+            self.sessions[session] = now + SESSION_SECONDS
+            self.owner_sessions[session] = access
+        cookie = f"{COOKIE}={session}; Path=/; Secure; HttpOnly; SameSite=Strict; Max-Age={SESSION_SECONDS}"
+        return redirect("/", clear + [("Set-Cookie", cookie)])
+
+    def not_signed_in(self, status: int, why: str, headers: list[tuple[str, str]]) -> Response:
+        body = f"""<section class="narrow"><h1>Not signed in</h1><p class="error">{esc(why)}</p>
+  <p><a class="button" href="/signin">Sign in with Firefly III</a></p></section>"""
+        resp = self.page(status, "Not signed in", body)
+        resp.headers.extend(headers)
+        return resp
+
+    def overview(self, state: dict) -> Response:
+        owner = str(part(state, "settings").get("SITE_OWNER") or "")
+        body = f"""<section class="narrow">
+  <h1>Your server</h1>
+  <p>Signed in with Firefly III as {esc(owner)}.</p>
+  {summary(state, links=False)}
+  <p class="quiet">Changing a step here comes next. Until then, on the server:
+  <code>scripts/firefly-pocket setup &lt;step&gt;</code>, one of bank, suggestions, alerts, backups, updates.</p>
+</section>"""
+        return self.page(200, "Your server", body, signed_in=True)
+
+    def finished(self, state: dict, status: int = 200) -> Response:
         hosts = hosts_of(state)
         links = ""
         for role in ("firefly", "app"):
@@ -1472,6 +1600,15 @@ class Console:
         problem = ""
         if last.get("state") == "failed":
             problem = f'<p class="error">The server\'s last step did not finish: {esc(last.get("message") or "")}</p>'
+        if part(state, "signin").get("client_id"):
+            signin = """<h2>This console</h2>
+  <p>It shows what the server has, to you only: <a class="button" href="/signin">Sign in with Firefly III</a></p>
+  <p class="quiet">Firefly III asks for your password, and its two-factor code once you have turned that on. The
+  first time it also asks whether to let the console in.</p>"""
+        else:
+            signin = """<h2>This console</h2>
+  <p class="quiet">Signing in here with Firefly III comes with the server's next deploy, which registers the console
+  in Firefly III. On the server, <code>scripts/firefly-pocket console client</code> does it now.</p>"""
         body = f"""<section class="narrow">
   <h1>Setup is finished</h1>
   <p>Firefly III has its account, every name is open, and the setup code works no more.</p>
@@ -1480,11 +1617,12 @@ class Console:
   <p>Sign in to Firefly III with your email and password, and turn on two-factor authentication there:
   Options, Profile. Firefly Pocket asks for a token: in Firefly III, Options, Profile, OAuth, Personal Access
   Tokens, Create one named after the phone.</p>
-  <h2>Anything left, over SSH</h2>
+  {signin}
+  <h2>Changing a step</h2>
   <p>On the server, <code>scripts/firefly-pocket setup &lt;step&gt;</code> sets up or changes one step: bank,
-  suggestions, alerts, backups, updates. Changing settings here comes later, behind Sign in with Firefly III.</p>
+  suggestions, alerts, backups, updates.</p>
 </section>"""
-        return self.page(200, "Setup is finished", body)
+        return self.page(status, "Setup is finished", body)
 
     # -------------------------------------------------------------- pages ---
     def page(self, status: int, title: str, main: str, refresh: int | None = None, signed_in: bool = False) -> Response:
@@ -1509,6 +1647,48 @@ class Console:
 </html>
 """
         return Response(status, doc.encode("utf-8"))
+
+
+def summary(state: dict, links: bool) -> str:
+    """What each step left, one row each: Finish's, with a link to each page,
+    and the signed-in page's after setup, without."""
+    settings = part(state, "settings")
+    hosts = hosts_of(state)
+    app_id = str(part(state, "bank").get("app_id") or "")
+    firefly = hosts.get("firefly", "")
+    bank = (f"the application <code>{esc(app_id)}</code>" if app_id else
+            '<span class="bad">not yet: Firefly Pocket links no bank until it is.</span> On the server, '
+            "<code>scripts/firefly-pocket setup bank</code> does it later.")
+    kept = part(state, "suggestions")
+    keys = [f"{name}'s key, <code>{esc(kept.get(key))}</code>" for key, name in PROVIDERS.items() if kept.get(key)]
+    suggestions = (f"{' and '.join(keys)}, for <code>{esc(kept.get('model') or DEFAULT_MODEL)}</code>" if keys else
+                   '<span class="bad">not yet: no suggestions until it is.</span> '
+                   "<code>scripts/firefly-pocket setup suggestions</code> does it later.")
+    alerts_kept = part(state, "alerts")
+    alerts = [f"ntfy, <code>{esc(alerts_kept.get('ntfy'))}</code>"] if alerts_kept.get("ntfy") else []
+    if alerts_kept.get("healthchecks"):
+        alerts.append("healthchecks.io's two checks")
+    alerts_html = (", and ".join(alerts) if alerts else
+                   '<span class="bad">only the Firefly Pocket app:</span> no ntfy, and nothing tells you when this '
+                   "server is down. <code>scripts/firefly-pocket setup alerts</code> does it later.")
+    repository = str(part(state, "backups").get("repository") or "")
+    backups_html = (f"each night to <code>{esc(repository)}</code>" if repository else
+                    '<span class="bad">on this server only:</span> losing it loses everything. '
+                    "<code>scripts/firefly-pocket setup backups</code> does it later.")
+    updates_html = ("the deploy agent is on: this server follows master, and the nightly jobs run"
+                    if part(state, "updates").get("agent") is True else
+                    '<span class="bad">off: nothing runs on a schedule,</span> so no nightly import and no backup. '
+                    "<code>scripts/firefly-pocket setup updates</code> does it later.")
+    rows = (("Server", "/server", f"{esc(settings.get('DOMAIN') or '')}, {esc(settings.get('SITE_OWNER') or '')}, "
+                                  f"{esc(settings.get('TZ') or '')}"),
+            ("Firefly III account", "/account", f"made: you sign in at <code>https://{esc(firefly)}</code>"),
+            ("Bank connection", "/bank", bank), ("Suggestions", "/suggestions", suggestions),
+            ("Alerts", "/alerts", alerts_html), ("Backups", "/backups", backups_html), ("Updates", "/updates", updates_html))
+    body = ""
+    for name, path, value in rows:
+        head = f'<a href="{path}">{name}</a>' if links else name
+        body += f'<tr><th scope="row">{head}</th><td>{value}</td></tr>'
+    return f'<table class="settings"><tbody>{body}</tbody></table>'
 
 
 def next_step(state: dict) -> str:

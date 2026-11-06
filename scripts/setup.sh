@@ -416,6 +416,8 @@ step_start() {
     out="$(smoke_test)" || { problem "$out"; die "not everything runs: docker compose --project-directory compose ps -a"; }
     ok "$out"
   fi
+  # The console's sign-in client, at this domain's address: after a new domain too.
+  "$FP" console client || SKIPPED+=("the console's sign-in: scripts/firefly-pocket console client")
   check_certificates || SKIPPED+=("certificates: scripts/firefly-pocket setup start")
 }
 

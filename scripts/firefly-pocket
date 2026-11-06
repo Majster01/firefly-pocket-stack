@@ -17,7 +17,7 @@ case "${1:-}" in
   *)
     echo "usage: scripts/firefly-pocket setup [<step>|web]" >&2
     echo "       scripts/firefly-pocket config <list|get|set|unset|has|check|render|import> ..." >&2
-    echo "       scripts/firefly-pocket console <apply|status|install>" >&2
+    echo "       scripts/firefly-pocket console <apply|status|install|client>" >&2
     exit 2
     ;;
 esac

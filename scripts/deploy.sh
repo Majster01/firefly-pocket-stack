@@ -27,6 +27,8 @@
 #   4. install the crontab
 #   5. check that Firefly III, the importer and Firefly Pocket answer and every
 #      service runs
+#   6. on a server set up before the console could sign in with Firefly III: its
+#      client, registered once (scripts/console.sh client). A failure only warns
 #
 # A failure goes to ntfy and the Firefly Pocket app. A success that upgraded a package
 # ("Upgrade successful: Firefly III 6.6.6 → 6.7.0") goes to the Firefly Pocket app, for the
@@ -169,6 +171,12 @@ if caddyfile_changed; then
 fi
 step "install the crontab" crontab "$REPO_ROOT/crontab"
 step "smoke test" smoke_test
+# The console's "Sign in with Firefly III" client, on a server set up before it
+# existed. Once, and never stops a deploy.
+if [ -n "${IMPORTER_FIREFLY_TOKEN:-}" ] && [ -z "${CONSOLE_CLIENT_ID:-}" ]; then
+  "$REPO_ROOT/scripts/console.sh" client --if-missing \
+    || echo "WARN: could not register the console's sign-in client (exit $?)" >&2
+fi
 
 echo "$new" > "$DEPLOYED_FILE"
 rm -f "$FAILED_FILE"

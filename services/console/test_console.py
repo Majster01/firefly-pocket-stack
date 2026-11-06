@@ -9,6 +9,8 @@ CI runs them in the image compose runs the console on, the way compose runs it:
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import http.client
 import json
 import os
@@ -21,7 +23,7 @@ import unittest
 from datetime import datetime, timezone
 from http.server import ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import quote
+from urllib.parse import parse_qs, quote, urlencode, urlsplit
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -30,6 +32,7 @@ from console import Console, NameCheck, Request, check, dns_verdict, normalize_c
 
 CODE = "7K2M-Q9TB-0XH4-PVRA"
 HOST = "admin.fx.example.com"
+CLIENT_ID = "9f2b6c1e-5a7d-4c3b-8e21-0d4f6a8b9c10"
 APP_ID = "1b4e28ba-2fa1-11d2-883f-0016d3cca427"
 ORIGIN = "https://github.com/Majster01/firefly-pocket-stack.git"
 CERT = "-----BEGIN CERTIFICATE-----\nMIIBszCCAVmgAwIBAgIU\n-----END CERTIFICATE-----\n"
@@ -41,6 +44,34 @@ class Clock:
 
     def __call__(self) -> float:
         return self.now
+
+
+class FakeFirefly:
+    """Firefly III's OAuth token endpoint and /api/v1/about/user, as far as the
+    console can tell: a code is good for the verifier of the challenge it was
+    asked for, once."""
+
+    def __init__(self, email: str = "you@example.com"):
+        self.email = email
+        self.challenge = ""
+        self.code = "the-code"
+        self.calls = []
+
+    def __call__(self, method, host, path, form=None, token=""):
+        self.calls.append((method, host, path, dict(form or {}), token))
+        if path == "/oauth/token":
+            verifier = (form or {}).get("code_verifier", "")
+            made = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).rstrip(b"=").decode()
+            if form.get("code") != self.code or made != self.challenge or form.get("client_id") != CLIENT_ID \
+                    or form.get("redirect_uri") != f"https://{HOST}/oauth/callback" or form.get("client_secret"):
+                return 400, {"error": "invalid_grant"}
+            self.code = ""
+            return 200, {"token_type": "Bearer", "access_token": "ff-access", "expires_in": 31536000}
+        if path == "/api/v1/about/user":
+            if token != "ff-access":
+                return 401, {}
+            return 200, {"data": {"type": "users", "attributes": {"email": self.email, "role": "owner"}}}
+        return 404, {}
 
 
 class ChecksTest(unittest.TestCase):
@@ -877,6 +908,129 @@ class ConsoleTest(unittest.TestCase):
         self.assertNotIn('class="bad"', page)
         for name in ("Server", "Firefly III account", "Bank connection", "Suggestions", "Alerts", "Backups", "Updates"):
             self.assertRegex(page, rf'<li class="done"><a href="/[a-z]+">{name}</a>')
+
+    # ------------------------------------------------------ after setup ---
+    def finished_status(self, client_id=CLIENT_ID, **extra):
+        self.bank_status(**extra)
+        state = json.loads(self.status.read_text())
+        state.update(setup_done=True, signin={"client_id": client_id})
+        self.status.write_text(json.dumps(state))
+
+    def start_signin(self, app) -> tuple[dict, str]:
+        resp = self.call("GET", "/signin", app=app)
+        self.assertEqual(resp.status, 303, resp.body[:300])
+        url = urlsplit(dict(resp.headers)["Location"])
+        self.assertEqual((url.scheme, url.netloc, url.path), ("https", "firefly.fx.example.com", "/oauth/authorize"))
+        cookie = dict(resp.headers)["Set-Cookie"]
+        self.assertIn("SameSite=Lax", cookie)
+        return {k: v[0] for k, v in parse_qs(url.query).items()}, cookie.split(";")[0]
+
+    def signed_in_owner(self, fake: FakeFirefly) -> str:
+        app = self.make(code="", firefly=fake)
+        query, signin = self.start_signin(app)
+        fake.challenge = query["code_challenge"]
+        resp = self.call("GET", "/oauth/callback?" + urlencode({"code": "the-code", "state": query["state"]}),
+                         cookie=signin, app=app)
+        self.assertEqual(resp.status, 303, resp.body[:600])
+        self.assertEqual(dict(resp.headers)["Location"], "/")
+        cookies = [v for k, v in resp.headers if k == "Set-Cookie"]
+        self.assertTrue(any(c.startswith("__Host-console-signin=;") for c in cookies), cookies)
+        session = [c for c in cookies if c.startswith("__Host-console=")][0]
+        self.assertIn("SameSite=Strict", session)
+        self.app = app
+        return session.split(";")[0]
+
+    def test_after_setup_it_offers_the_sign_in(self):
+        self.finished_status()
+        page = self.call("GET", "/", app=self.make(code="")).body.decode()
+        self.assertIn("Setup is finished", page)
+        self.assertIn('href="/signin"', page)
+        self.finished_status(client_id="")
+        page = self.call("GET", "/", app=self.make(code="")).body.decode()
+        self.assertIn("console client", page)
+        self.assertNotIn('href="/signin"', page)
+        self.assertEqual(self.call("GET", "/signin", app=self.make(code="")).status, 503)
+
+    def test_sign_in_with_firefly_iii(self):
+        self.finished_status()
+        fake = FakeFirefly()
+        app = self.make(code="", firefly=fake)
+        query, _ = self.start_signin(app)
+        self.assertEqual({k: query[k] for k in ("client_id", "redirect_uri", "response_type", "code_challenge_method")},
+                         {"client_id": CLIENT_ID, "redirect_uri": f"https://{HOST}/oauth/callback",
+                          "response_type": "code", "code_challenge_method": "S256"})
+        self.assertGreaterEqual(len(query["state"]), 24)
+        session = self.signed_in_owner(fake)
+        page = self.call("GET", "/", cookie=session).body.decode()
+        for want in ("<h1>Your server</h1>", "Signed in with Firefly III as you@example.com", "Bank connection",
+                     'action="/logout"'):
+            self.assertIn(want, page)
+        self.assertNotIn('<a href="/bank">', page)  # no step page to go to yet
+        self.assertEqual(dict(self.call("GET", "/bank", cookie=session).headers)["Location"], "/")
+        # The token was asked for with no secret, and checked against the account.
+        self.assertEqual([c[2] for c in fake.calls], ["/oauth/token", "/api/v1/about/user"])
+        self.assertNotIn("client_secret", fake.calls[0][3])
+        self.assertEqual(fake.calls[1][4], "ff-access")
+        # Signed out: where things are, and the sign-in again.
+        self.assertEqual(self.call("POST", "/logout", cookie=session).status, 303)
+        self.assertIn("Setup is finished", self.call("GET", "/", cookie=session).body.decode())
+
+    def test_sign_in_is_for_the_owner_only(self):
+        self.finished_status()
+        fake = FakeFirefly(email="someone@example.com")
+        app = self.make(code="", firefly=fake)
+        query, signin = self.start_signin(app)
+        fake.challenge = query["code_challenge"]
+        resp = self.call("GET", "/oauth/callback?" + urlencode({"code": "the-code", "state": query["state"]}),
+                         cookie=signin, app=app)
+        self.assertEqual(resp.status, 403)
+        self.assertIn("someone@example.com", resp.body.decode())
+        self.assertIn("you@example.com", resp.body.decode())
+        self.assertFalse([v for k, v in resp.headers if k == "Set-Cookie" and v.startswith("__Host-console=")])
+
+    def test_sign_in_needs_its_own_state(self):
+        self.finished_status()
+        fake = FakeFirefly()
+        app = self.make(code="", firefly=fake)
+        query, signin = self.start_signin(app)
+        fake.challenge = query["code_challenge"]
+        callback = "/oauth/callback?" + urlencode({"code": "the-code", "state": query["state"]})
+        # Another browser's, or none.
+        self.assertEqual(self.call("GET", callback, cookie="__Host-console-signin=other", app=app).status, 400)
+        query, signin = self.start_signin(app)
+        fake.challenge = query["code_challenge"]
+        self.assertEqual(self.call("GET", "/oauth/callback?code=the-code&state=made-up", cookie=signin, app=app).status,
+                         400)
+        # Ten minutes: then it starts again.
+        self.clock.now += 601
+        callback = "/oauth/callback?" + urlencode({"code": "the-code", "state": query["state"]})
+        self.assertEqual(self.call("GET", callback, cookie=signin, app=app).status, 400)
+        self.assertEqual(fake.calls, [])  # Firefly III was never asked
+
+    def test_sign_in_when_firefly_iii_says_no(self):
+        self.finished_status()
+        fake = FakeFirefly()
+        app = self.make(code="", firefly=fake)
+        query, signin = self.start_signin(app)
+        resp = self.call("GET", "/oauth/callback?" + urlencode({"error": "access_denied", "state": query["state"],
+                                                                "error_description": "The user denied the request."}),
+                         cookie=signin, app=app)
+        self.assertEqual(resp.status, 403)
+        self.assertIn("The user denied the request.", resp.body.decode())
+        query, signin = self.start_signin(app)
+        fake.challenge = "not-this-one"
+        resp = self.call("GET", "/oauth/callback?" + urlencode({"code": "the-code", "state": query["state"]}),
+                         cookie=signin, app=app)
+        self.assertEqual(resp.status, 502)
+        self.assertIn("HTTP 400", resp.body.decode())
+
+    def test_the_setup_code_opens_nothing_after_setup(self):
+        self.bank_status()
+        cookie = self.sign_in()
+        self.finished_status()
+        page = self.call("GET", "/", cookie=cookie).body.decode()
+        self.assertIn("Setup is finished", page)
+        self.assertNotIn("Your server", page)
 
     def test_no_code(self):
         resp = self.call("GET", "/", app=self.make(code=""))

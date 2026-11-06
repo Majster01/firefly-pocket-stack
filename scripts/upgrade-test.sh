@@ -25,6 +25,9 @@
 #   6. a server whose .env is still edited by hand: config import, as yours
 #      runs it once, and up -d again, which must recreate nothing: every value
 #      is still the same
+#   7. the console's sign-in client, as the deploy registers it once on a server
+#      set up before it (console client --if-missing): made in Firefly III's
+#      database as it is, and kept when asked again
 #
 # Needs Docker. Never for the server: like boot-test.sh, it uses the server's
 # names, and refuses where a compose/.env exists.
@@ -129,6 +132,19 @@ if [ -z "$carried" ]; then
   fi
   smoke_test
   echo "every service runs on as it was"
+fi
+
+echo "==> the console's sign-in client, as the deploy registers it on a server set up before it"
+if [ -z "$(scripts/firefly-pocket config get CONSOLE_CLIENT_ID 2>/dev/null)" ]; then
+  scripts/firefly-pocket console client --if-missing
+  id="$(scripts/firefly-pocket config get CONSOLE_CLIENT_ID)"
+  [ -n "$id" ] || { echo "CONSOLE_CLIENT_ID was not kept"; exit 1; }
+  [ "$(jq -r .signin.client_id compose/console/status/status.json)" = "$id" ] \
+    || { echo "the console's status does not carry the client"; exit 1; }
+  scripts/firefly-pocket console client | tee "$old/client.out"
+  grep -q "its client, $id, is kept" "$old/client.out" || { echo "asked again, the client was not kept"; exit 1; }
+else
+  echo "$from registered it already"
 fi
 
 echo "==> upgraded from $from and checked"
