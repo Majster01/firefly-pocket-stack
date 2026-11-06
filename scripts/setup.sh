@@ -22,8 +22,9 @@
 #   bank         Enable Banking: a key and certificate made here for the application
 #                you register, then its ID, checked with a signed request (bank.sh,
 #                which the console's bank step uses too)
-#   suggestions  an Anthropic or Gemini key, checked by asking for the model
+#   suggestions  an Anthropic or Gemini key, checked by asking for the model (suggestions.sh)
 #   alerts       an ntfy topic made here and tested; healthchecks.io checks made with its API key
+#                (alerts.sh)
 #   backups      a restic repository, opened or created; its password shown to keep
 #   updates      the deploy agent (scripts/install-deploy-agent.sh), which keeps this
 #                server on master and installs the nightly jobs
@@ -39,7 +40,8 @@
 # III has its account, every name then shows only the console, at
 # https://admin.<domain>, which asks for that code (the Caddyfile's setup gate).
 # Its pages are the domain and you steps, then the account and start steps, then
-# the bank step; the rest is this wizard's for now. The code works until setup
+# the bank, suggestions and alerts steps; backups and updates are this wizard's
+# for now. The code works until setup
 # finishes: the console's Finish, or this wizard's full run or finish step, ends
 # it. What the console saves, scripts/console.sh applies: setup web installs the
 # systemd unit that runs it, unless FIREFLY_POCKET_NO_SYSTEMD is set (CI).
@@ -54,13 +56,18 @@ CONFIG="$COMPOSE_DIR/config.json"
 source "$REPO_ROOT/scripts/host.sh"
 FP="$REPO_ROOT/scripts/firefly-pocket"
 STEPS="domain you account start bank suggestions alerts backups updates"
-# The account and the apps' tokens (TOKENS, firefly_up, make_tokens), and
-# Enable Banking's key and check (EB_CERT, make_eb_key, eb_check), shared with
-# the console's steps.
+# The account and the apps' tokens (TOKENS, firefly_up, make_tokens), Enable
+# Banking's key and check (EB_CERT, make_eb_key, eb_check), the AI key's check
+# (model_check) and the alerts' (ntfy_send, hc_setup), shared with the
+# console's steps.
 # shellcheck source=account.sh
 source "$REPO_ROOT/scripts/account.sh"
 # shellcheck source=bank.sh
 source "$REPO_ROOT/scripts/bank.sh"
+# shellcheck source=suggestions.sh
+source "$REPO_ROOT/scripts/suggestions.sh"
+# shellcheck source=alerts.sh
+source "$REPO_ROOT/scripts/alerts.sh"
 
 # Answers come from the terminal, or else from stdin, which then moves to fd 3:
 # no command the wizard runs can read an answer meant for a later question.
@@ -179,19 +186,6 @@ randstr() {
     out="$out$(LC_ALL=C head -c 256 /dev/urandom | LC_ALL=C tr -dc 'a-z0-9')"
   done
   printf '%s' "${out:0:$1}"
-}
-
-# Secrets go to curl as a config file on stdin, never on its command line.
-# curl_with <header-with-secret> <curl args...>: the response body in $WORK/body,
-# the HTTP status on stdout ("000" when there was no answer).
-curl_with() {
-  local header="$1" code
-  shift
-  : > "$WORK/body"
-  # With no answer at all curl writes 000 itself, and fails.
-  code="$(printf 'header = "%s"\n' "$header" \
-    | curl -sS --max-time 30 --config - -o "$WORK/body" -w '%{http_code}' "$@" 2>/dev/null || true)"
-  printf '%s' "${code:-000}"
 }
 
 # --------------------------------------------------------------- domain ---
@@ -444,8 +438,9 @@ step_web() {
     reload
     heading "Open https://$ADMIN_HOSTNAME"
     say "and enter the setup code:" "" "    $SETUP_CODE" "" \
-        "Firefly III has its account, so every name is open; the console has the bank connection" \
-        "left, then Finish, which ends this code. scripts/firefly-pocket setup finish ends it here."
+        "Firefly III has its account, so every name is open; the console has the bank connection," \
+        "suggestions and alerts left, then Finish, which ends this code. scripts/firefly-pocket setup" \
+        "finish ends it here."
     return 0
   fi
   say "The console asks for the rest of the server and makes your Firefly III account, at" \
@@ -553,27 +548,13 @@ step_bank() {
 }
 
 # ---------------------------------------------------------- suggestions ---
-# model_check anthropic|gemini <key> <model>: the provider lists the model for the key.
-model_check() {
-  local code
-  if [ "$1" = anthropic ]; then
-    code="$(curl_with "x-api-key: $2" -H 'anthropic-version: 2026-10-21' "https://api.anthropic.com/v1/models/$3")"
-  else
-    code="$(curl_with "x-goog-api-key: $2" "https://generativelanguage.googleapis.com/v1beta/models/$3")"
-  fi
-  [ "$code" = 200 ] && return 0
-  problem "$1 answered $code: $(jq -r '.error.message // .error // empty' "$WORK/body" 2>/dev/null | head -c 300 || true)"
-  [ "$code" != 404 ] || problem "no model $3 for this key"
-  return 1
-}
-
 step_suggestions() {
   heading "Category suggestions"
   reload
   say "Each night an AI model suggests a category for each new transaction, as a rule you approve in" \
       "Firefly Pocket. It needs an API key: Anthropic's (console.anthropic.com, an account with" \
       "credit) or Gemini's (a paid project: the free tier allows 20 requests a day)."
-  local model="${SUGGESTER_MODEL:-claude-haiku-5-5}" provider key current
+  local model="${SUGGESTER_MODEL:-$SUGGESTER_DEFAULT_MODEL}" provider key current
   if [[ "$model" == gemini-* ]]; then current="${GEMINI_API_KEY:-}"; else current="${ANTHROPIC_API_KEY:-}"; fi
   while :; do
     if [ -n "$current" ]; then
@@ -587,19 +568,19 @@ step_suggestions() {
       SKIPPED+=("category suggestions: scripts/firefly-pocket setup suggestions")
       return 0
     fi
-    case "$key" in
-      sk-ant-*) provider=anthropic ;;
-      AIza*) provider=gemini ;;
-      *) if confirm "Is it a Gemini key? (no: Anthropic)" n; then provider=gemini; else provider=anthropic; fi ;;
-    esac
+    provider="$(key_provider "$key")"
+    if [ -z "$provider" ]; then
+      if confirm "Is it a Gemini key? (no: Anthropic)" n; then provider=gemini; else provider=anthropic; fi
+    fi
     if [ "$provider" = anthropic ]; then
-      [[ "$model" == claude-* ]] || model=claude-haiku-5-5
+      [[ "$model" == claude-* ]] || model="$SUGGESTER_DEFAULT_MODEL"
     elif [[ "$model" != gemini-* ]]; then
       ask "Gemini model, as Google names it (ai.google.dev/gemini-api/docs/models)"
       model="$ANSWER"
     fi
-    "$FP" config check SUGGESTER_MODEL "$model" 2>/dev/null || { problem "$model is no model name"; model="${SUGGESTER_MODEL:-claude-haiku-5-5}"; continue; }
+    "$FP" config check SUGGESTER_MODEL "$model" 2>/dev/null || { problem "$model is no model name"; model="${SUGGESTER_MODEL:-$SUGGESTER_DEFAULT_MODEL}"; continue; }
     if model_check "$provider" "$key" "$model"; then break; fi
+    problem "$MODEL_PROBLEM"
     current=""
   done
   if [ "$provider" = anthropic ]; then put ANTHROPIC_API_KEY "$key"; else put GEMINI_API_KEY "$key"; fi || die "the key does not pass its check"
@@ -609,20 +590,6 @@ step_suggestions() {
 }
 
 # --------------------------------------------------------------- alerts ---
-# hc_check <api-key> <name> <cron> <what>: a healthchecks.io check, made or found
-# by its name; its ping URL on stdout.
-hc_check() {
-  local body code
-  body="$(jq -cn --arg name "$2" --arg schedule "$3" --arg tz "$TZ" --arg desc "$4" \
-    '{name: $name, schedule: $schedule, tz: $tz, grace: 3600, channels: "*", unique: ["name"], tags: "firefly-pocket", desc: $desc}')"
-  code="$(curl_with "X-Api-Key: $1" -H 'Content-Type: application/json' --data "$body" https://healthchecks.io/api/v3/checks/)"
-  if [ "$code" != 200 ] && [ "$code" != 201 ]; then
-    problem "healthchecks.io answered $code: $(jq -r '.error // empty' "$WORK/body" 2>/dev/null | head -c 200 || true)" >&2
-    return 1
-  fi
-  jq -er '.ping_url // empty' "$WORK/body" || { problem "healthchecks.io gave no ping URL" >&2; return 1; }
-}
-
 step_alerts() {
   heading "Alerts"
   reload
@@ -644,8 +611,7 @@ step_alerts() {
     say "Subscribe to it: in the ntfy app (Android, iOS), Subscribe to topic, ${url##*/}" \
         "(on ${url%/*}); or open $url in a browser."
     while confirm "Send a test alert?" y; do
-      if curl -fsS --max-time 20 -o /dev/null -H "Title: Firefly Pocket: test" \
-          -d "Alerts from $(hostname) arrive here." "$url"; then
+      if ntfy_send "$url" "Firefly Pocket: test" "Alerts from $(hostname) arrive here."; then
         confirm "Did it arrive?" y && break 2
         say "Look at the topic you subscribed to: ${url##*/}."
       else
@@ -660,24 +626,23 @@ step_alerts() {
       "report in on time. Its API key makes both checks: your project's Settings, API Access, the" \
       "read-write key. The key is used once, not kept."
   [ -z "${HEALTHCHECK_NIGHTLY_URL:-}" ] || [ -z "${HEALTHCHECK_BACKUP_URL:-}" ] || ok "both checks are set; Enter keeps them"
-  local nightly backup
   while :; do
     ask_secret "healthchecks.io API key (Enter to $( [ -n "${HEALTHCHECK_NIGHTLY_URL:-}" ] && echo keep || echo skip))"
     if [ -z "$ANSWER" ]; then
       [ -n "${HEALTHCHECK_NIGHTLY_URL:-}" ] || SKIPPED+=("the dead man's switch: scripts/firefly-pocket setup alerts")
       return 0
     fi
-    nightly="$(hc_check "$ANSWER" "Firefly Pocket nightly" "0 3 * * *" "scripts/nightly.sh on $(hostname): the bank import")" || continue
-    backup="$(hc_check "$ANSWER" "Firefly Pocket backup" "0 2 * * *" "scripts/backup.sh on $(hostname)")" || continue
-    break
+    hc_setup "$ANSWER" && break
+    problem "$HC_PROBLEM"
   done
   ANSWER=""
-  if ! put HEALTHCHECK_NIGHTLY_URL "$nightly" || ! put HEALTHCHECK_BACKUP_URL "$backup"; then
+  if ! put HEALTHCHECK_NIGHTLY_URL "$HC_NIGHTLY" || ! put HEALTHCHECK_BACKUP_URL "$HC_BACKUP"; then
     die "healthchecks.io gave ping URLs that do not pass their check"
   fi
   reload
-  for url in "$nightly" "$backup"; do
-    curl -fsS --max-time 10 -o /dev/null --data-raw "set up by firefly-pocket setup" "$url" || problem "the first ping to $url failed"
+  local url
+  for url in "$HC_NIGHTLY" "$HC_BACKUP"; do
+    hc_ping "$url" "set up by firefly-pocket setup" || problem "the first ping to one of the checks failed"
   done
   ok "both checks made, with their schedules in $TZ, and pinged once"
 }
