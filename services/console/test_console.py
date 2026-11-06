@@ -31,6 +31,7 @@ from console import Console, NameCheck, Request, check, dns_verdict, normalize_c
 CODE = "7K2M-Q9TB-0XH4-PVRA"
 HOST = "admin.fx.example.com"
 APP_ID = "1b4e28ba-2fa1-11d2-883f-0016d3cca427"
+ORIGIN = "https://github.com/Majster01/firefly-pocket-stack.git"
 CERT = "-----BEGIN CERTIFICATE-----\nMIIBszCCAVmgAwIBAgIU\n-----END CERTIFICATE-----\n"
 
 
@@ -447,7 +448,7 @@ class ConsoleTest(unittest.TestCase):
         self.assertNotIn(b'http-equiv="refresh"', page)
 
     # ------------------------------------------------- the steps in order ---
-    def bank_status(self, requests=None, suggestions=None, alerts=None, backups=None, **bank):
+    def bank_status(self, requests=None, suggestions=None, alerts=None, backups=None, updates=None, **bank):
         state = {"key": False, "certificate": "", "app_id": "",
                  "redirect_urls": ["https://app.fx.example.com/eb-callback", "https://import.fx.example.com/eb-callback"]}
         state.update(bank)
@@ -456,6 +457,7 @@ class ConsoleTest(unittest.TestCase):
                             alerts=alerts or {"ntfy": "", "healthchecks": False},
                             backups=backups or {"repository": "", "access_key_id": "", "secret_access_key": "",
                                                 "restic": True},
+                            updates=updates or {"agent": False, "origin": ORIGIN},
                             names=[{"role": "admin", "host": HOST}, {"role": "firefly", "host": "firefly.fx.example.com"},
                                    {"role": "app", "host": "app.fx.example.com"},
                                    {"role": "legal", "host": "legal.fx.example.com"}])
@@ -624,7 +626,11 @@ class ConsoleTest(unittest.TestCase):
                                "alerts": {"ntfy": "…abcd", "healthchecks": False}}, "/backups"),
                              ({"app_id": APP_ID, "suggestions": {"anthropic": "…wxyz", "model": "claude-haiku-5-5"},
                                "alerts": {"ntfy": "…abcd", "healthchecks": False},
-                               "backups": {"repository": "/srv/restic", "restic": True}}, "/finish")):
+                               "backups": {"repository": "/srv/restic", "restic": True}}, "/updates"),
+                             ({"app_id": APP_ID, "suggestions": {"anthropic": "…wxyz", "model": "claude-haiku-5-5"},
+                               "alerts": {"ntfy": "…abcd", "healthchecks": False},
+                               "backups": {"repository": "/srv/restic", "restic": True},
+                               "updates": {"agent": True, "origin": ORIGIN}}, "/finish")):
             self.bank_status(**extra)
             self.assertEqual(dict(self.call("POST", "/login", f"code={CODE}").headers)["Location"], where, extra)
 
@@ -752,7 +758,7 @@ class ConsoleTest(unittest.TestCase):
         page = self.call("GET", "/backups", cookie=cookie).body.decode()
         for want in ("backs up to <code>s3:https://s3.example.com/bucket/fp</code>", "Another repository, or new keys",
                      'value="s3:https://s3.example.com/bucket/fp"', 'name="mode" value="existing" checked',
-                     "Empty keeps this server&#x27;s, …cret.", "<code>…KEY1</code>", "Next: Finish"):
+                     "Empty keeps this server&#x27;s, …cret.", "<code>…KEY1</code>", "Next: Updates"):
             self.assertIn(want, page)
         self.assertNotIn("Skip it for now", page)
         self.bank_status(backups={"repository": "rest:https://me:…@backup.example.com/", "restic": False})
@@ -807,7 +813,7 @@ class ConsoleTest(unittest.TestCase):
                                          "message": "Saved: restic made the repository, with the password you kept."}},
                          backups={"repository": "/srv/restic", "restic": True})
         page = self.call("GET", location, cookie=cookie).body.decode()
-        self.assertIn("Next: Finish", page)
+        self.assertIn("Next: Updates", page)
         self.assertNotIn(password, page)
         self.assertNotIn(password, self.call("GET", "/backups", cookie=cookie).body.decode())
         # One restic uses already, S3 with the server's keys: an empty password is this server's.
@@ -826,6 +832,51 @@ class ConsoleTest(unittest.TestCase):
         self.assertIn("each night to <code>s3:https://s3.example.com/b/fp</code>", page)
         self.assertNotIn("setup backups", page)
         self.assertRegex(page, r'<li class="done"><a href="/backups">Backups</a>')
+
+    # ------------------------------------------------------------ updates ---
+    def test_updates_page(self):
+        self.bank_status()
+        cookie = self.sign_in()
+        page = self.call("GET", "/updates", cookie=cookie).body.decode()
+        for want in ('aria-current="step">Updates', f"master of <code>{ORIGIN}</code>", "nothing runs on a schedule",
+                     'action="/updates"', "Turn on the deploy agent", "sudo without a password", "Skip it for now",
+                     "setup updates"):
+            self.assertIn(want, page)
+        self.assertNotIn("over SSH for now", page)
+        self.bank_status(updates={"agent": True, "origin": ORIGIN})
+        page = self.call("GET", "/updates", cookie=cookie).body.decode()
+        self.assertIn(f"The deploy agent is on: this server follows master of <code>{ORIGIN}</code>", page)
+        self.assertIn("Next: Finish", page)
+        self.assertNotIn('action="/updates"', page)
+
+    def test_updates_hands_the_request_to_the_agent(self):
+        self.bank_status()
+        cookie = self.sign_in()
+        location, request = self.request_of(self.call("POST", "/updates", "", cookie=cookie))
+        self.assertEqual({k: request[k] for k in ("action", "code")}, {"action": "updates", "code": "7K2MQ9TB0XH4PVRA"})
+        rid = location.rsplit("/", 1)[1]
+        self.assertIn(b"Turning on the deploy agent", self.call("GET", location, cookie=cookie).body)
+        self.bank_status(requests={rid: {"state": "refused", "action": "updates", "at": "2026-11-06T12:00:00Z",
+                                         "message": "this server's user has no sudo without a password"}})
+        page = self.call("GET", location, cookie=cookie).body.decode()
+        self.assertIn("<h1>Not turned on</h1>", page)
+        self.assertIn('href="/updates"', page)
+        self.bank_status(requests={rid: {"state": "applied", "action": "updates", "at": "2026-11-06T12:00:00Z",
+                                         "message": "The deploy agent is on."}}, updates={"agent": True, "origin": ORIGIN})
+        page = self.call("GET", location, cookie=cookie).body.decode()
+        self.assertIn("<h1>Turned on</h1>", page)
+        self.assertIn("Next: Finish", page)
+
+    def test_finish_lists_every_step(self):
+        self.bank_status(app_id=APP_ID, suggestions={"anthropic": "…wxyz", "gemini": "", "model": "claude-haiku-5-5"},
+                         alerts={"ntfy": "…3xq1", "healthchecks": True},
+                         backups={"repository": "/srv/restic", "restic": True}, updates={"agent": True, "origin": ORIGIN})
+        page = self.call("GET", "/finish", cookie=self.sign_in()).body.decode()
+        self.assertIn("the deploy agent is on", page)
+        self.assertNotIn("Left for the server", page)
+        self.assertNotIn('class="bad"', page)
+        for name in ("Server", "Firefly III account", "Bank connection", "Suggestions", "Alerts", "Backups", "Updates"):
+            self.assertRegex(page, rf'<li class="done"><a href="/[a-z]+">{name}</a>')
 
     def test_no_code(self):
         resp = self.call("GET", "/", app=self.make(code=""))

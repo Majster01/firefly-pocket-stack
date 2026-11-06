@@ -57,6 +57,12 @@
 #                        the password the console showed you to keep, or one restic uses
 #                        already opened with its password (empty: this server's). Empty S3
 #                        keys keep the server's. All of it kept once the repository opens
+#       {"action": "updates", "code": "..."}
+#                        the wizard's updates step: the deploy agent turned on, with
+#                        install-deploy-agent.sh for this checkout. Its timer is a systemd
+#                        unit, so this needs sudo without a password, as a server made from
+#                        terraform/cloud-init.yaml has; otherwise it is refused, and the
+#                        wizard, which can ask for the password, does it
 #       {"action": "finish", "code": "..."}
 #                        the end of setup: the code is removed, and the console starts
 #                        again without it
@@ -65,8 +71,9 @@
 #                        finished, the bank step's certificate, application ID and redirect
 #                        URLs, the last four characters of each key and topic kept, the
 #                        model, whether the checks are made, the backup's repository (any
-#                        password in it hidden) and whether restic is installed, and what
-#                        became of the last 20 requests. No secret.
+#                        password in it hidden) and whether restic is installed, whether the
+#                        deploy agent is on and the repository it follows, and what became
+#                        of the last 20 requests. No secret.
 #
 # apply runs under the lock the deploy and the cron jobs take, one request after
 # another in the order the console wrote them.
@@ -194,22 +201,33 @@ last4() {
   [ -z "$value" ] || printf '…%s' "${value: -4}"
 }
 
-# The suggestions, alerts and backups steps': what is kept, a secret only by its
-# last four.
+# The suggestions, alerts, backups and updates steps': what is kept, a secret
+# only by its last four.
 extras_json() {
-  local checks=false restic=false repository
+  local checks=false restic=false repository agent=false
   [ -z "$(env_value HEALTHCHECK_NIGHTLY_URL)" ] || [ -z "$(env_value HEALTHCHECK_BACKUP_URL)" ] || checks=true
   ! command -v restic >/dev/null 2>&1 || restic=true
   repository="$(env_value RESTIC_REPOSITORY)"
   [ -z "$repository" ] || repository="$(restic_shown "$repository")"
+  ! agent_on || agent=true
   jq -nc --arg anthropic "$(last4 ANTHROPIC_API_KEY)" --arg gemini "$(last4 GEMINI_API_KEY)" \
     --arg model "$(stored SUGGESTER_MODEL)" --arg default "$SUGGESTER_DEFAULT_MODEL" \
     --arg ntfy "$(last4 NTFY_URL)" --argjson checks "$checks" \
     --arg repository "$repository" --arg key_id "$(last4 AWS_ACCESS_KEY_ID)" \
-    --arg secret_key "$(last4 AWS_SECRET_ACCESS_KEY)" --argjson restic "$restic" '
+    --arg secret_key "$(last4 AWS_SECRET_ACCESS_KEY)" --argjson restic "$restic" \
+    --argjson agent "$agent" --arg origin "$(origin_shown)" '
     { suggestions: {anthropic: $anthropic, gemini: $gemini, model: (if $model == "" then $default else $model end)},
       alerts: {ntfy: $ntfy, healthchecks: $checks},
-      backups: {repository: $repository, access_key_id: $key_id, secret_access_key: $secret_key, restic: $restic} }'
+      backups: {repository: $repository, access_key_id: $key_id, secret_access_key: $secret_key, restic: $restic},
+      updates: {agent: $agent, origin: $origin} }'
+}
+
+# origin_shown: the repository this checkout follows, as the console may show
+# it: a token in its URL is not, as a password in a restic repository's is not.
+origin_shown() {
+  local origin
+  origin="$(git -C "$REPO_ROOT" remote get-url origin 2>/dev/null || true)"
+  [ -z "$origin" ] || restic_shown "$origin"
 }
 
 write_status() {
@@ -232,7 +250,7 @@ write_status() {
       settings: {DOMAIN: $domain, SITE_OWNER: $owner, LEGAL_OWNER_NAME: $name, TZ: $tz, ADMIN_HOSTNAME: $admin},
       host_timezone: $host_tz, addresses: {v4: $v4, v6: $v6}, names: $derived.names,
       bank: ($bank + {redirect_urls: $derived.redirect_urls}),
-      suggestions: $extras.suggestions, alerts: $extras.alerts, backups: $extras.backups,
+      suggestions: $extras.suggestions, alerts: $extras.alerts, backups: $extras.backups, updates: $extras.updates,
       requests: ($old + $new | to_entries | sort_by(.value.at) | .[-20:] | from_entries) }' > "$tmp"
   chmod 644 "$tmp"
   mv -f "$tmp" "$STATUS"
@@ -259,7 +277,7 @@ apply_one() {
   fi
   ACTION="$(jq -r 'if type == "object" and (.action | type) == "string" then .action else "" end' <"$file" 2>/dev/null || true)"
   case "$ACTION" in
-    server | account | bank_key | bank | suggestions | ntfy | ntfy_test | healthchecks | backups | finish) ;;
+    server | account | bank_key | bank | suggestions | ntfy | ntfy_test | healthchecks | backups | updates | finish) ;;
     *)
       ACTION=""
       result "$id" refused "Not a request this version of the server knows."
@@ -638,6 +656,42 @@ apply_backups() {
   fi
   password="" secret=""
   result "$id" applied "$message The nightly backup, at 02:00, copies to it from its next run."
+  return 1
+}
+
+# apply_updates <id> <file>: 1, always: what the deploy agent starts, its first
+# run starts, within two minutes; it waits for this lock.
+apply_updates() {
+  local id="$1" out key
+  if agent_on; then
+    result "$id" applied "The deploy agent is on already."
+    return 1
+  fi
+  # sudo -n: never a prompt, which nobody would answer.
+  if ! sudo -n true 2>/dev/null; then
+    result "$id" refused "The deploy agent's timer is a systemd unit, so turning it on needs sudo, and this server's user has no sudo without a password. On the server: scripts/firefly-pocket setup updates, which asks for it."
+    return 1
+  fi
+  result "$id" running "Turning on the deploy agent."
+  write_status
+  out="$(REPO_DIR="$REPO_ROOT" "$REPO_ROOT/scripts/install-deploy-agent.sh" </dev/null 2>&1)" || {
+    printf '%s\n' "$out" >&2
+    result "$id" failed "The deploy agent did not turn on: $(grep -v '^[[:space:]]*$' <<<"$out" | tail -n 1 | cut -c1-300)"
+    return 1
+  }
+  printf '%s\n' "$out" >&2
+  # A private fork is fetched with a deploy key, which the installer makes and
+  # stops at: it is public, and the console shows it.
+  if grep -q 'Created a deploy key' <<<"$out"; then
+    key="$(grep -m 1 '^ssh-ed25519 ' <<<"$out" || true)"
+    result "$id" refused "This server fetches a private repository, so it needs a deploy key. Add this one to the repository under Settings, Deploy keys, without write access, then turn the agent on again: $key"
+    return 1
+  fi
+  if ! agent_on; then
+    result "$id" failed "The installer ran, but fireflyx-deploy.timer is not on. On the server: systemctl status fireflyx-deploy.timer"
+    return 1
+  fi
+  result "$id" applied "The deploy agent is on. Within two minutes it deploys master of $(origin_shown) and installs the nightly jobs: the backup at 02:00, the bank import at 03:00 and the restore tests on Sundays."
   return 1
 }
 
