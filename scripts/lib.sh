@@ -11,6 +11,8 @@ ENV_FILE="$COMPOSE_DIR/.env"
 # get past the importer's basic auth).
 CURL_IMAGE="curlimages/curl:8.21.0"
 DOCKER_NETWORK="fireflyx"
+# The console's network, which it shares with Caddy only (docker-compose.yml).
+CONSOLE_NETWORK="fireflyx_console"
 
 # The services whose new image migrates a database on start, so the deploy
 # backs up and restore-tests before it starts one. The bundle's release.json
@@ -20,10 +22,12 @@ MIGRATING="app db importer"
 
 # What the release bundle holds: everything a server reads, and nothing it
 # does not, so no CI, Terraform, docs or the suggester's source (its image is
-# in the bundle by digest). scripts/make-bundle.sh reads this line to build the
-# bundle, and the server agent's shadow mode to compare one with the checkout.
+# in the bundle by digest). The console's source is in it: compose runs it on
+# the stock python image, mounted. scripts/make-bundle.sh reads this line to
+# build the bundle, and the server agent's shadow mode to compare one with the
+# checkout.
 # shellcheck disable=SC2034  # read by make-bundle.sh and agent.sh, not sourced
-BUNDLE_PATHS="LICENSE crontab scripts config compose/docker-compose.yml compose/Caddyfile compose/.env.example compose/initdb compose/legal compose/secrets compose/importer"
+BUNDLE_PATHS="LICENSE crontab scripts config services/console compose/docker-compose.yml compose/Caddyfile compose/.env.example compose/initdb compose/legal compose/secrets compose/importer"
 
 if [ ! -f "$ENV_FILE" ]; then
   echo "FATAL: $ENV_FILE not found. Run scripts/gen-secrets.sh first." >&2
@@ -64,6 +68,10 @@ for _host in FIREFLY_HOSTNAME NEXT_HOSTNAME IMPORT_HOSTNAME LEGAL_HOSTNAME; do
   fi
 done
 unset _host
+# The console's host. A server with no DOMAIN has none until ADMIN_HOSTNAME is
+# set: Caddy then serves admin.localhost, from its own CA, which no one
+# outside reaches by name.
+export ADMIN_HOSTNAME="${ADMIN_HOSTNAME:-admin.${DOMAIN:-localhost}}"
 
 # Firefly Pocket's Web Push endpoint, reached on the internal network (Caddy refuses
 # /api/internal/* from outside). Only used when NEXT_NOTIFY_TOKEN is set.
@@ -302,7 +310,8 @@ internal_http() {
 }
 
 # smoke_test: the apps answer on the internal network (Firefly III may still be
-# migrating, so each gets five minutes), and every service compose starts runs.
+# migrating, so each gets five minutes), every service compose starts runs,
+# and the console answers on its own network.
 # Firefly Pocket's /api/test is a plain Laravel route: nginx, php-fpm and the
 # app, no Firefly call and no login. The deploy's last step, and what CI checks
 # a booted stack with (scripts/boot-test.sh).
@@ -341,7 +350,14 @@ smoke_test() {
     echo "not running:$down"
     return 1
   fi
-  echo "Firefly III, the importer and Firefly Pocket answer; every service runs"
+  # The console has a network of its own: asked there.
+  for _ in $(seq 6); do
+    docker run --rm --network "$CONSOLE_NETWORK" "$CURL_IMAGE" -fsS --max-time 10 -o /dev/null \
+      http://console:8080/health >/dev/null 2>&1 && break
+    [ "$_" -lt 6 ] || { echo "no answer from the console (http://console:8080/health)"; return 1; }
+    sleep 5
+  done
+  echo "Firefly III, the importer, Firefly Pocket and the console answer; every service runs"
 }
 
 # Same, but POST. internal_http_post <url> [max-seconds]

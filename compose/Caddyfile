@@ -28,6 +28,22 @@
 	}
 }
 
+# The setup gate (Setup UI step 4). Until Firefly III has its account, anyone
+# who reaches it could claim it, so until then every host but the console's
+# sends the browser to the console, which asks for the setup code.
+# FIREFLY_POCKET_SETUP is "done" once the importer has its Firefly III token,
+# which setup makes right after the account (docker-compose.yml); compose then
+# recreates Caddy, as its environment changed. A missing value gates.
+#
+# In Caddy's directive order redir comes after the headers and before
+# basic_auth, try_files, route and reverse_proxy, so nothing behind it answers,
+# Firefly III's /register above all. Caddy still gets each name its
+# certificate: ACME challenges are answered before any site's routes.
+(setup_gate) {
+	@setup_pending not vars {env.FIREFLY_POCKET_SETUP} done
+	redir @setup_pending https://{$ADMIN_HOSTNAME}/ 302
+}
+
 # The legal pages, from a read-only mount: on their own host, and under
 # /legal/ on Firefly Pocket's. try_files gives clean URLs, so /privacy serves
 # privacy.html; templates fills in the operator's details (see below).
@@ -42,6 +58,7 @@
 # account exists (single_user_mode; there is no flag, see docker-compose.yml).
 {$FIREFLY_HOSTNAME} {
 	import security_headers
+	import setup_gate
 	reverse_proxy app:8080
 }
 
@@ -60,6 +77,7 @@
 #   - /legal/*: the legal site below, so this host can stand in for it
 {$NEXT_HOSTNAME} {
 	import security_headers
+	import setup_gate
 
 	@next_internal path /api/internal /api/internal/*
 	@fireflyx_callback {
@@ -97,6 +115,7 @@
 # stays fully locked down without breaking automation.
 {$IMPORT_HOSTNAME} {
 	import security_headers
+	import setup_gate
 
 	# Consent callbacks of links started from Firefly Pocket. Enable Banking only
 	# redirects to the registered /eb-callback, so both flows arrive there; the
@@ -139,7 +158,17 @@
 # (compose passes them to Caddy), so nothing personal is committed.
 {$LEGAL_HOSTNAME} {
 	import security_headers
+	import setup_gate
 	import legal_pages
+}
+
+# The Firefly Pocket Console (Setup UI): setup in the browser, and the one host
+# the gate leaves open. It holds no secret but the setup code and changes
+# nothing itself: what it saves, the host agent checks and applies
+# (docker-compose.yml, the console service).
+{$ADMIN_HOSTNAME} {
+	import security_headers
+	reverse_proxy console:8080
 }
 
 # Intentionally absent:

@@ -4,13 +4,14 @@
 #
 #     scripts/firefly-pocket setup            every step, in order
 #     scripts/firefly-pocket setup <step>     one step again, then start
+#     scripts/firefly-pocket setup web        start in a browser instead (below)
 #
 # Each step asks only for what you have to give, checks it, and keeps it in the
 # settings store (scripts/config.sh); everything else is generated, the Firefly
 # III tokens included. Run it again to change an answer: Enter keeps what is
 # there. compose/.env is written from the store, so nobody opens it.
 #
-#   domain       the domain, and that each of its four names resolves to this server
+#   domain       the domain, and that each of its five names resolves to this server
 #   you          your email, your name for the legal pages and the timezone; then
 #                every secret is generated (gen-secrets.sh)
 #   account      your Firefly III account and a token for each app, made inside
@@ -29,6 +30,14 @@
 # before then, and again at the end with every answer. Answers are read from stdin
 # when it is not a terminal, one line each, which is how the boot test runs it
 # (scripts/boot-test.sh).
+#
+# setup web asks only for the domain and your email, which Caddy needs, makes a
+# setup code and starts Caddy and the Firefly Pocket Console alone. Until Firefly
+# III has its account, every name then shows only the console, at
+# https://admin.<domain>, which asks for that code (the Caddyfile's setup gate).
+# Its first page is the domain and you steps; the rest is this wizard's for now.
+# What the console saves, scripts/console.sh applies: setup web installs the
+# systemd unit that runs it, unless FIREFLY_POCKET_NO_SYSTEMD is set (CI).
 
 set -euo pipefail
 shopt -s inherit_errexit
@@ -36,6 +45,8 @@ shopt -s inherit_errexit
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 COMPOSE_DIR="$REPO_ROOT/compose"
 CONFIG="$COMPOSE_DIR/config.json"
+# shellcheck source=host.sh
+source "$REPO_ROOT/scripts/host.sh"
 FP="$REPO_ROOT/scripts/firefly-pocket"
 EB_CERT="$COMPOSE_DIR/secrets/eb/application.crt"
 STEPS="domain you account start bank suggestions alerts backups updates"
@@ -143,13 +154,15 @@ reload() {
   source "$REPO_ROOT/scripts/lib.sh"
 }
 
-# The four names, as compose and lib.sh derive them: <name>.<domain> unless one
-# is set on its own.
+# The five names, as compose and lib.sh derive them: <name>.<domain> unless one
+# is set on its own. One with neither is left out (without a domain, the
+# console's has no name until ADMIN_HOSTNAME is set).
 names() {
   local domain="$1" pair value
-  for pair in FIREFLY_HOSTNAME:firefly NEXT_HOSTNAME:app IMPORT_HOSTNAME:import LEGAL_HOSTNAME:legal; do
+  for pair in ADMIN_HOSTNAME:admin FIREFLY_HOSTNAME:firefly NEXT_HOSTNAME:app IMPORT_HOSTNAME:import LEGAL_HOSTNAME:legal; do
     value="$(stored "${pair%%:*}")"
-    printf '%s\n' "${value:-${domain:+${pair#*:}.$domain}}"
+    value="${value:-${domain:+${pair#*:}.$domain}}"
+    [ -z "$value" ] || printf '%s\n' "$value"
   done
 }
 
@@ -179,17 +192,7 @@ curl_with() {
 }
 
 # --------------------------------------------------------------- domain ---
-# my_address 4|6: this server's address on its default route: the public one,
-# unless the server sits behind NAT. Nothing when it has none.
-my_address() {
-  local target=1.1.1.1
-  [ "$1" = 4 ] || target=2606:4700:4700::1111
-  command -v ip >/dev/null 2>&1 || return 0
-  # Without a route (a server with no IPv6) ip fails: no address, not an error.
-  { ip "-$1" route get "$target" 2>/dev/null | sed -n 's/.* src \([0-9a-fA-F.:]*\).*/\1/p' | head -n 1; } || true
-}
-
-private_v4() { [[ "$1" =~ ^(10\.|127\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.|100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.) ]]; }
+# my_address, private_v4 and host_timezone are in host.sh.
 
 # Each name resolves, and only to this server: Let's Encrypt tries every address
 # a name has, IPv6 first.
@@ -255,10 +258,10 @@ step_domain() {
   v4="$(my_address 4)"
   v6="$(my_address 6)"
   [ -n "$v4" ] || v4="<this server's IPv4 address>"
-  say "Firefly Pocket answers on four names under a domain of yours: firefly.<domain> is Firefly III," \
-      "app.<domain> Firefly Pocket, import.<domain> the bank importer, and legal.<domain> the privacy" \
-      "policy and terms. A subdomain works too, such as money.example.com. Point one wildcard record" \
-      "at this server first:" \
+  say "Firefly Pocket answers on five names under a domain of yours: firefly.<domain> is Firefly III," \
+      "app.<domain> Firefly Pocket, admin.<domain> its console, import.<domain> the bank importer," \
+      "and legal.<domain> the privacy policy and terms. A subdomain works too, such as" \
+      "money.example.com. Point one wildcard record at this server first:" \
       "    *.<domain>   A      $v4"
   [ -z "$v6" ] || say "    *.<domain>   AAAA   $v6   (optional)"
   for key in FIREFLY_HOSTNAME NEXT_HOSTNAME IMPORT_HOSTNAME LEGAL_HOSTNAME; do
@@ -271,7 +274,7 @@ step_domain() {
     ANSWER="${ANSWER%.}"
     if [ -z "$ANSWER" ]; then
       if [ -n "$all_set" ]; then
-        ok "no domain: each of the four names is set on its own ($(names "" | paste -sd' ' -))"
+        ok "no domain: each name is set on its own ($(names "" | paste -sd' ' -))"
         break
       fi
       problem "a domain is needed"
@@ -283,12 +286,6 @@ step_domain() {
 }
 
 # ------------------------------------------------------------------ you ---
-host_timezone() {
-  local tz=""
-  tz="$(timedatectl show -p Timezone --value 2>/dev/null || true)"
-  [ -n "$tz" ] || tz="$(readlink /etc/localtime 2>/dev/null | sed -n 's#.*/zoneinfo/##p' || true)"
-  printf '%s' "${tz:-Etc/UTC}"
-}
 
 # gen-secrets.sh fills every generated value that is empty, and nothing else.
 generate() {
@@ -303,18 +300,23 @@ generate() {
   fi
 }
 
-step_you() {
-  heading "You"
+# Your email. The others follow it, unless one was set to something else on
+# purpose; scripts/console.sh does the same with what the console saves.
+ask_email() {
   local old acme vapid
   old="$(get SITE_OWNER)"
   say "One email address of yours: your Firefly III account's, Let's Encrypt's for certificate" \
       "notices, the push services' contact, and the legal pages'."
   until ask_setting SITE_OWNER "Email" "$old"; do problem "an email address is needed"; done
-  # The others follow it, unless one was set to something else on purpose.
   acme="$(get ACME_EMAIL)"
   if [ -z "$acme" ] || [ "$acme" = "$old" ]; then put ACME_EMAIL "$ANSWER"; fi
   vapid="$(get VAPID_SUBJECT)"
   if [ -z "$vapid" ] || [ "$vapid" = "mailto:$old" ]; then put VAPID_SUBJECT "mailto:$ANSWER"; fi
+}
+
+step_you() {
+  heading "You"
+  ask_email
 
   say "" "Your name, as the operator the privacy policy and terms name. Enable Banking's reviewers" \
       "read them. Enter for none (\"the operator of this server\")."
@@ -439,6 +441,7 @@ step_account() {
 # ---------------------------------------------------------------- start ---
 agent_on() { systemctl is-enabled --quiet fireflyx-deploy.timer 2>/dev/null; }
 
+# check_certificates [<host>...]: every name, or those given.
 check_certificates() {
   local host pending=() still=() _
   if is_localhost "${DOMAIN:-}"; then
@@ -449,7 +452,7 @@ check_certificates() {
     say "ACME_CA is set, so the certificates come from $ACME_CA; not checked."
     return 0
   fi
-  mapfile -t pending < <(names "${DOMAIN:-}")
+  if [ $# -gt 0 ]; then pending=("$@"); else mapfile -t pending < <(names "${DOMAIN:-}"); fi
   say "Waiting for Let's Encrypt to give each name its certificate, up to three minutes."
   for _ in $(seq 18); do
     still=()
@@ -484,12 +487,64 @@ step_start() {
   else
     say "Pulling the images and starting every service. The first time takes a few minutes."
     compose pull --quiet --ignore-buildable
+    # The console's directories, made by this user before compose would make them as root.
+    "$FP" console status
     compose up -d --no-build --remove-orphans
     local out
     out="$(smoke_test)" || { problem "$out"; die "not everything runs: docker compose --project-directory compose ps -a"; }
     ok "$out"
   fi
   check_certificates || SKIPPED+=("certificates: scripts/firefly-pocket setup start")
+}
+
+# ------------------------------------------------------------------ web ---
+# The setup code: 16 characters of Crockford's base32 (no I, L, O or U), 80 bits,
+# in groups of four. Asked for by the console until setup is finished.
+make_setup_code() {
+  local raw=""
+  while [ "${#raw}" -lt 16 ]; do
+    raw="$raw$(LC_ALL=C head -c 256 /dev/urandom | LC_ALL=C tr -dc '0-9A-HJKMNP-TV-Z')"
+  done
+  printf '%s-%s-%s-%s' "${raw:0:4}" "${raw:4:4}" "${raw:8:4}" "${raw:12:4}"
+}
+
+step_web() {
+  heading "Setup in the browser"
+  if has IMPORTER_FIREFLY_TOKEN 2>/dev/null; then
+    ok "setup is finished: Firefly III has its account, so the console has nothing to set up"
+    say "Change an answer with scripts/firefly-pocket setup <step> ($STEPS)."
+    return 0
+  fi
+  say "The console asks the rest, at https://admin.<domain>. It needs the domain first, and an" \
+      "email for Let's Encrypt, so Caddy can get its certificate."
+  step_domain
+  heading "You"
+  ask_email
+  generate
+  has SETUP_CODE || printf '%s\n' "$(make_setup_code)" | "$FP" config set --no-render SETUP_CODE - >/dev/null
+  reload
+
+  heading "The console"
+  if [ -n "${FIREFLY_POCKET_NO_SYSTEMD:-}" ]; then
+    say "FIREFLY_POCKET_NO_SYSTEMD is set, so nothing applies what the console saves by itself:" \
+        "scripts/firefly-pocket console apply does, each time."
+  else
+    say "A systemd unit applies what the console saves, as soon as it saves it (sudo):"
+    "$FP" console install | sed 's/^/   /'
+  fi
+  "$FP" console status
+  say "Starting Caddy and the console, and nothing else. Until your Firefly III account exists," \
+      "every other name sends the browser to the console."
+  compose up -d --no-build --no-deps --quiet-pull caddy console
+  check_certificates "$ADMIN_HOSTNAME" || SKIPPED+=("the console's certificate: scripts/firefly-pocket setup web")
+
+  heading "Open https://$ADMIN_HOSTNAME"
+  say "and enter the setup code:" "" "    $SETUP_CODE" "" \
+      "Run this again to see it. It works until your Firefly III account exists."
+  if [ "${#SKIPPED[@]}" -gt 0 ]; then
+    say "" "Left for later:"
+    printf '     - %s\n' "${SKIPPED[@]}"
+  fi
 }
 
 # ----------------------------------------------------------------- bank ---
@@ -832,8 +887,11 @@ case "${1:-}" in
     [ -f "$CONFIG" ] || die "nothing is set up yet: run scripts/firefly-pocket setup"
     "step_$1"
     ;;
+  web)
+    step_web
+    ;;
   *)
-    sed -n '3,30s/^# \{0,1\}//p' "${BASH_SOURCE[0]}" >&2
+    sed -n '3,39s/^# \{0,1\}//p' "${BASH_SOURCE[0]}" >&2
     exit 2
     ;;
 esac

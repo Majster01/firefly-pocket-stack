@@ -22,7 +22,8 @@
 #   2. if the image of Firefly III, Postgres or the importer is about to change:
 #      back up, and prove the backup restores. They migrate databases on start
 #   3. docker compose up -d --no-build --remove-orphans: compose restarts only
-#      what changed (and Caddy, when the Caddyfile changed)
+#      what changed (and Caddy, when the Caddyfile changed). The console's
+#      directories and status are written first (scripts/console.sh)
 #   4. install the crontab
 #   5. check that Firefly III, the importer and Firefly Pocket answer and every
 #      service runs
@@ -158,6 +159,9 @@ if needs_backup; then
   step "backup" "$REPO_ROOT/scripts/backup.sh"
   step "restore test" "$REPO_ROOT/scripts/restore-test.sh"
 fi
+# The console's directories, made by this user before compose would make them as
+# root, and the status it shows (scripts/console.sh). Never stops a deploy.
+"$REPO_ROOT/scripts/console.sh" status || echo "WARN: could not write the console's status (exit $?)" >&2
 # --no-build: an image that is missing stops the deploy instead of being built here.
 step "start what changed" compose up -d --no-build --remove-orphans
 if caddyfile_changed; then
