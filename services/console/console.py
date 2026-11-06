@@ -1,20 +1,24 @@
 #!/usr/bin/env python3
 """Firefly Pocket Console: setup in the browser, on admin.<domain>.
 
-Setup UI step 4. Until Firefly III has its account, every other host sends the
-browser here (the Caddyfile's setup gate), and this asks for the setup code
-that `scripts/firefly-pocket setup web` printed on the server. Its first page
-sets the domain, your email, your name and the timezone, and shows whether each
-name points at this server and has its certificate. The rest of setup runs over
-SSH for now, until the console takes those steps over too.
+Setup UI steps 4 and 5. Until Firefly III has its account, every other host
+sends the browser here (the Caddyfile's setup gate), and this asks for the
+setup code that `scripts/firefly-pocket setup web` printed on the server. Its
+first page sets the domain, your email, your name and the timezone, and shows
+whether each name points at this server and has its certificate. Its second
+asks for your Firefly III account's password; the server then makes the
+account and a token for each app inside Firefly III, and starts everything,
+which opens the gate. The rest of setup runs over SSH for now, until the
+console takes those steps over too.
 
 It is built so that taking it over gains little:
 
 - It never touches Docker or the settings. Save turns into a request file in
   /inbox, a directory it can add files to but not list; the host agent checks
   each request as `firefly-pocket config set` would, and applies it
-  (scripts/console.sh). What it shows comes from /status, which the agent
-  writes and which holds no secret.
+  (scripts/console.sh). Each carries the setup code, which the agent checks
+  too. What it shows comes from /status, which the agent writes and which
+  holds no secret. The password goes into its request and nowhere else.
 - The setup code works only until setup is finished: FIREFLY_POCKET_SETUP is
   "done" once the importer has its Firefly III token. After that the console
   only says where things are, and the agent refuses its requests too.
@@ -134,16 +138,29 @@ SERVER_FIELDS = (
     ),
 )
 
-# The setup's steps, as the CLI wizard has them. Only the first is here so far.
+# The setup's steps, as the CLI wizard has them, and the page of each that is
+# here so far.
 STEPS = (
-    "Server",
-    "Firefly III account",
-    "Bank connection",
-    "Suggestions",
-    "Alerts",
-    "Backups",
-    "Updates",
+    ("Server", "/server"),
+    ("Firefly III account", "/account"),
+    ("Bank connection", None),
+    ("Suggestions", None),
+    ("Alerts", None),
+    ("Backups", None),
+    ("Updates", None),
 )
+
+# Firefly III's minimum, which the agent checks again.
+MIN_PASSWORD = 16
+# A request the agent has said nothing about for this long is not running any
+# more: firefly-pocket-console.service stops it after 30 minutes.
+STALE_SECONDS = 40 * 60
+
+# What a request's outcome is called: done, not done, and while the server works on it.
+OUTCOME = {
+    "server": ("Saved", "Not saved", "Saving"),
+    "account": ("Done", "Not done", "Making your account"),
+}
 
 ROLES = {
     "admin": "this console",
@@ -241,12 +258,13 @@ class NameCheck:
 
 
 # ------------------------------------------------------------- requests ---
-def write_request(inbox: Path, action: str, settings: dict[str, str]) -> str:
+def write_request(inbox: Path, action: str, code: str, fields: dict) -> str:
     """Hand a request to the host agent: written beside, then renamed into
-    place, so the agent never reads half of one (it takes *.json only)."""
+    place, so the agent never reads half of one (it takes *.json only). The
+    setup code goes with it, for the agent to check."""
     rid = secrets.token_hex(16)
     data = json.dumps(
-        {"version": 1, "id": rid, "action": action, "settings": settings, "at": now_iso()}
+        {"version": 1, "id": rid, "action": action, "code": code, **fields, "at": now_iso()}
     ).encode()
     tmp = inbox / f".{rid}.tmp"
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
@@ -336,7 +354,8 @@ class Console:
         self.lock = threading.Lock()
         self.sessions: dict[str, float] = {}
         self.failures: deque[float] = deque()
-        self.pending: dict[str, tuple[float, str]] = {}  # request id: (when, the host it moves to)
+        # request id: (when, its action, the host the console moves to)
+        self.pending: dict[str, tuple[float, str, str]] = {}
 
     @classmethod
     def from_env(cls, env=os.environ) -> Console:
@@ -377,6 +396,8 @@ class Console:
             return redirect("/server")
         if path == "/server":
             return self.save_server(req) if req.method == "POST" else self.server_page(req)
+        if path == "/account":
+            return self.save_account(req) if req.method == "POST" else self.account_page(req)
         match = re.fullmatch(r"/requests/([0-9a-f]{32})", path)
         if match and req.method != "POST":
             return self.request_page(req, match.group(1))
@@ -469,10 +490,8 @@ class Console:
     <h2>Names</h2>
     {names_html}
     <h2>Next</h2>
-    <p>The other steps run over SSH for now. On the server, run</p>
-    <pre>scripts/firefly-pocket setup</pre>
-    <p>Enter keeps what you saved here. Once your Firefly III account exists, every name opens, and this
-    console has nothing more to do.</p>
+    <p>Once these are saved: your Firefly III account. The names need not be ready for it.</p>
+    <p><a class="button" href="/account">Firefly III account</a></p>
   </section>
 </div>"""
         return self.page(status, "Server", body, signed_in=True)
@@ -550,16 +569,115 @@ class Console:
         moves_to = str(settings.get("ADMIN_HOSTNAME") or "") or f"admin.{values['DOMAIN']}"
         here = req.headers.get("host", "").split(":")[0]
         try:
-            rid = write_request(self.inbox, "server", values)
+            rid = write_request(self.inbox, "server", self.code, {"settings": values})
         except OSError:
-            note = (
-                '<p class="error">The console could not hand this to the server: it cannot write to '
-                "compose/console/inbox. On the server: <code>scripts/firefly-pocket console status</code> "
-                "makes it as it should be.</p>"
-            )
-            return self.server_page(req, 503, values, note=note)
+            return self.server_page(req, 503, values, note=NO_INBOX)
         with self.lock:
-            self.pending[rid] = (self.clock(), moves_to if moves_to != here else "")
+            self.pending[rid] = (self.clock(), "server", moves_to if moves_to != here else "")
+        return redirect(f"/requests/{rid}")
+
+    # ------------------------------------------------------------ account ---
+    def account_running(self) -> str:
+        """The account request the server is still working on, if any: a second
+        one would only be refused."""
+        requests = read_status(self.status_file).get("requests")
+        requests = requests if isinstance(requests, dict) else {}
+        with self.lock:
+            mine = [rid for rid, (_, action, _) in self.pending.items() if action == "account"]
+        for rid in mine:
+            result = requests.get(rid)
+            if not isinstance(result, dict) or (result.get("state") == "running" and not self.stale(result)):
+                return rid
+        return ""
+
+    def stale(self, result: dict) -> bool:
+        """A request still running long after systemd would have stopped the
+        agent (its unit allows it 30 minutes): the agent died on the way."""
+        try:
+            at = datetime.strptime(str(result.get("at")), "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+        except ValueError:
+            return False
+        return self.clock() - at.timestamp() > STALE_SECONDS
+
+    def server_saved(self) -> bool:
+        """The account needs the Server step's email, and the timezone saved
+        with it; the agent checks this too."""
+        settings = read_status(self.status_file).get("settings")
+        return isinstance(settings, dict) and bool(settings.get("SITE_OWNER")) and bool(settings.get("TZ"))
+
+    def account_page(self, req: Request, status: int = 200, errors=None, note: str = "") -> Response:
+        running = self.account_running()
+        if running:
+            return redirect(f"/requests/{running}")
+        state = read_status(self.status_file)
+        settings = state.get("settings") if isinstance(state.get("settings"), dict) else {}
+        hosts = {n.get("role"): n.get("host") for n in state.get("names") or [] if isinstance(n, dict)}
+        email = str(settings.get("SITE_OWNER") or "")
+        if not self.server_saved():
+            body = f"""
+<div class="setup">
+  {stepper(1)}
+  <section class="panel">
+    <h1>Firefly III account</h1>
+    <p>Save the Server step first: the account's email is the one it keeps.</p>
+    <p><a class="button" href="/server">Server</a></p>
+  </section>
+</div>"""
+            return self.page(status, "Firefly III account", body, signed_in=True)
+        errors = errors or {}
+        firefly = str(hosts.get("firefly") or "")
+        where = f" at <code>https://{esc(firefly)}</code>" if firefly else ""  # none before a domain
+        body = f"""
+<div class="setup">
+  {stepper(1)}
+  <section class="panel">
+    <h1>Firefly III account</h1>
+    {note}
+    <p>Your Firefly III account: you sign in{where} with your email and this password. The server makes
+    it, and a token for each app (the bank importer, the suggester and Firefly Pocket's warm-up) inside
+    Firefly III: nobody opens its registration page or copies a token.</p>
+    <form method="post" action="/account" novalidate>
+      <div class="field">
+        <label for="email">Email</label>
+        <input id="email" name="email" type="email" value="{esc(email)}" readonly autocomplete="username"
+               aria-describedby="email-help">
+        <p class="quiet" id="email-help">The one the Server step saved.</p>
+      </div>
+      {password_field("password", "Password", errors.get("password", ""),
+                      f"At least {MIN_PASSWORD} characters, Firefly III's minimum. A password manager's is best.")}
+      {password_field("password2", "Once more", errors.get("password2", ""), "")}
+      <button type="submit">Make the account</button>
+    </form>
+    <p class="quiet">It takes a few minutes: the server downloads every service, starts Firefly III, which
+    sets up its database the first time, makes the account and the tokens, then starts everything else.
+    Then every name opens, and the setup code works no more.</p>
+  </section>
+</div>"""
+        return self.page(status, "Firefly III account", body, signed_in=True)
+
+    def save_account(self, req: Request) -> Response:
+        running = self.account_running()
+        if running:
+            return redirect(f"/requests/{running}")
+        if not self.server_saved():
+            return self.account_page(req, 409)
+        form = req.form()
+        password, again = form.get("password", ""), form.get("password2", "")
+        errors: dict[str, str] = {}
+        if any(ord(c) < 32 or ord(c) == 127 for c in password):
+            errors["password"] = "No control characters"
+        elif len(password) < MIN_PASSWORD:
+            errors["password"] = f"At least {MIN_PASSWORD} characters"
+        elif again != password:
+            errors["password2"] = "The two differ"
+        if errors:
+            return self.account_page(req, 400, errors)
+        try:
+            rid = write_request(self.inbox, "account", self.code, {"password": password})
+        except OSError:
+            return self.account_page(req, 503, note=NO_INBOX)
+        with self.lock:
+            self.pending[rid] = (self.clock(), "account", "")
         return redirect(f"/requests/{rid}")
 
     def request_page(self, req: Request, rid: str) -> Response:
@@ -567,14 +685,33 @@ class Console:
         requests = state.get("requests") if isinstance(state.get("requests"), dict) else {}
         result = requests.get(rid)
         with self.lock:
-            started, moves_to = self.pending.get(rid, (0.0, ""))
+            started, action, moves_to = self.pending.get(rid, (0.0, "", ""))
         if isinstance(result, dict):
+            action = str(result.get("action") or action)
+        done, not_done, working = OUTCOME.get(action, OUTCOME["server"])
+        back = "/account" if action == "account" else "/server"
+        if isinstance(result, dict) and result.get("state") in ("applied", "refused", "failed"):
             message = esc(result.get("message") or "")
-            if result.get("state") == "applied":
-                return self.page(200, "Saved", f'<section class="narrow"><h1>Saved</h1><p>{message}</p>'
-                                 '<p><a class="button" href="/server">Back to setup</a></p></section>', signed_in=True)
-            return self.page(200, "Not saved", f'<section class="narrow"><h1>Not saved</h1><p class="error">{message}</p>'
-                             '<p><a class="button" href="/server">Back to setup</a></p></section>', signed_in=True)
+            if result.get("state") != "applied":
+                return self.page(200, not_done, f'<section class="narrow"><h1>{not_done}</h1><p class="error">{message}</p>'
+                                 f'<p><a class="button" href="{back}">Back to setup</a></p></section>', signed_in=True)
+            links = f'<a class="button" href="{back}">Back to setup</a>'
+            if action == "server":
+                links = '<a class="button" href="/account">Next: Firefly III account</a> <a href="/server">Back to Server</a>'
+            return self.page(200, done, f'<section class="narrow"><h1>{done}</h1><p>{message}</p><p>{links}</p></section>',
+                             signed_in=True)
+        if isinstance(result, dict):  # running: the server says how far it got
+            if self.stale(result):
+                body = f"""<section class="narrow"><h1>{not_done}</h1>
+  <p>The server stopped working on it, after: {esc(result.get("message") or "")}</p>
+  <p class="error">On the server, <code>journalctl -u firefly-pocket-console</code> says why.</p>
+  <p><a class="button" href="{back}">Back to setup</a></p></section>"""
+                return self.page(200, not_done, body, signed_in=True)
+            body = f"""<section class="narrow"><h1>{working}</h1>
+  <p>{esc(result.get("message") or "")}</p>
+  <p class="quiet">This takes a few minutes. This page looks again every few seconds; reload it if it shows an
+  error while Caddy starts again.</p></section>"""
+            return self.page(202, working, body, refresh=3, signed_in=True)
         if not started:
             return self.page(404, "Not found", '<h1>Not found</h1><p><a href="/server">Back to setup</a></p>', signed_in=True)
         if moves_to:
@@ -591,10 +728,10 @@ class Console:
             hint = """<p class="error">The server has not picked it up yet. On the server, see whether the unit that
   applies it runs: <code>systemctl status firefly-pocket-console.path</code>, or apply it by hand:
   <code>scripts/firefly-pocket console apply</code></p>"""
-        body = f"""<section class="narrow"><h1>Saving</h1>
-  <p>The server checks each value, keeps it and starts Caddy again with it. This page looks again every few
-  seconds; reload it if it shows an error while Caddy restarts.</p>{hint}</section>"""
-        return self.page(202, "Saving", body, refresh=3, signed_in=True)
+        body = f"""<section class="narrow"><h1>{working}</h1>
+  <p>The server checks what you sent and applies it. This page looks again every few seconds; reload it if it
+  shows an error while Caddy starts again.</p>{hint}</section>"""
+        return self.page(202, working, body, refresh=3, signed_in=True)
 
     # ----------------------------------------------------------- finished ---
     def finished(self) -> Response:
@@ -604,14 +741,27 @@ class Console:
         for role in ("firefly", "app"):
             if hosts.get(role):
                 links += f'<li>{esc(ROLES[role])}: <a href="https://{esc(hosts[role])}/">https://{esc(hosts[role])}/</a></li>'
+        # The account step can fail after the account is made, when starting the rest.
+        requests = state.get("requests") if isinstance(state.get("requests"), dict) else {}
+        latest = max((r for r in requests.values() if isinstance(r, dict)), key=lambda r: str(r.get("at") or ""),
+                     default={})
+        problem = ""
+        if latest.get("state") == "failed":
+            problem = f'<p class="error">The server\'s last step did not finish: {esc(latest.get("message") or "")}</p>'
         body = f"""<section class="narrow">
-  <h1>Setup is finished</h1>
-  <p>Firefly III has its account, so the setup code works no more.</p>
+  <h1>Firefly III has its account</h1>
+  <p>So every name is open, and the setup code works no more.</p>
+  {problem}
   {f'<ul>{links}</ul>' if links else ''}
-  <p>Changing settings here comes later, behind Sign in with Firefly III. Until then, on the server:
-  <code>scripts/firefly-pocket setup &lt;step&gt;</code></p>
+  <p>Sign in to Firefly III with your email and password, and turn on two-factor authentication there:
+  Options, Profile. Firefly Pocket asks for a token: in Firefly III, Options, Profile, OAuth, Personal Access
+  Tokens, Create one named after the phone.</p>
+  <h2>Next, over SSH</h2>
+  <p>The bank connection, suggestions, alerts, backups and updates. On the server,
+  <code>scripts/firefly-pocket setup</code> goes through every step; Enter keeps what is set. Changing
+  settings here comes later, behind Sign in with Firefly III.</p>
 </section>"""
-        return self.page(200, "Setup is finished", body)
+        return self.page(200, "Firefly III has its account", body)
 
     # -------------------------------------------------------------- pages ---
     def page(self, status: int, title: str, main: str, refresh: int | None = None, signed_in: bool = False) -> Response:
@@ -640,12 +790,33 @@ class Console:
 
 def stepper(current: int) -> str:
     items = ""
-    for i, name in enumerate(STEPS):
+    for i, (name, path) in enumerate(STEPS):
         state = "now" if i == current else ("done" if i < current else "later")
         aria = ' aria-current="step"' if i == current else ""
-        items += f'<li class="{state}"{aria}>{esc(name)}</li>'
+        label = f'<a href="{path}">{esc(name)}</a>' if path and i != current else esc(name)
+        items += f'<li class="{state}"{aria}>{label}</li>'
     return f"""<nav class="steps" aria-label="Setup steps"><ol>{items}</ol>
-    <p class="quiet">After Server, the steps run over SSH for now.</p></nav>"""
+    <p class="quiet">After the account, the steps run over SSH for now.</p></nav>"""
+
+
+def password_field(name: str, label: str, error: str, help_text: str) -> str:
+    """A new password: never filled in again, after an error either."""
+    described = " ".join(x for x in (f"{name}-help" if help_text else "", f"{name}-error" if error else "") if x)
+    return f"""
+      <div class="field">
+        <label for="{name}">{esc(label)}</label>
+        <input id="{name}" name="{name}" type="password" autocomplete="new-password" minlength="{MIN_PASSWORD}"
+               required{' aria-invalid="true"' if error else ''}{f' aria-describedby="{described}"' if described else ''}>
+        {f'<p class="error" id="{name}-error">{esc(error)}</p>' if error else ''}
+        {f'<p class="quiet" id="{name}-help">{esc(help_text)}</p>' if help_text else ''}
+      </div>"""
+
+
+NO_INBOX = (
+    '<p class="error">The console could not hand this to the server: it cannot write to '
+    "compose/console/inbox. On the server: <code>scripts/firefly-pocket console status</code> "
+    "makes it as it should be.</p>"
+)
 
 
 def redirect(location: str, headers: list[tuple[str, str]] | None = None) -> Response:
@@ -655,11 +826,15 @@ def redirect(location: str, headers: list[tuple[str, str]] | None = None) -> Res
 def same_origin(req: Request) -> bool:
     """A POST must come from a page of this console: its Origin is this host,
     as the browser saw it through Caddy. With the cookie's SameSite=Strict, no
-    other site can make a signed-in browser save anything."""
+    other site can make a signed-in browser save anything.
+
+    A browser sends Origin "null" where a referrer policy hides it (no-referrer
+    does, even for a form on the same page): then Sec-Fetch-Site decides, which
+    no page can set, and which says cross-site for a sandboxed frame elsewhere."""
     host = req.headers.get("host", "")
     proto = req.headers.get("x-forwarded-proto", "https")
     origin = req.headers.get("origin")
-    if origin is not None:
+    if origin is not None and origin != "null":
         return bool(host) and origin == f"{proto}://{host}"
     return req.headers.get("sec-fetch-site") == "same-origin"
 
@@ -678,7 +853,9 @@ SECURITY_HEADERS = (
     ("Content-Security-Policy",
      "default-src 'none'; style-src 'self'; img-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'"),
     ("Cache-Control", "no-store"),
-    ("Referrer-Policy", "no-referrer"),
+    # same-origin, not no-referrer: no-referrer makes a browser send Origin
+    # "null" with this console's own forms.
+    ("Referrer-Policy", "same-origin"),
     ("X-Content-Type-Options", "nosniff"),
 )
 

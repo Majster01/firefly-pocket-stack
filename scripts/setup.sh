@@ -15,7 +15,8 @@
 #   you          your email, your name for the legal pages and the timezone; then
 #                every secret is generated (gen-secrets.sh)
 #   account      your Firefly III account and a token for each app, made inside
-#                Firefly III (scripts/firefly-bootstrap.php); /register is closed after
+#                Firefly III (scripts/firefly-bootstrap.php, through account.sh, which
+#                the console's account step uses too); /register is closed after
 #   start        every service started (by the deploy agent, once it runs), and each
 #                name's certificate checked
 #   bank         Enable Banking: a key and certificate made here for the application
@@ -35,9 +36,10 @@
 # setup code and starts Caddy and the Firefly Pocket Console alone. Until Firefly
 # III has its account, every name then shows only the console, at
 # https://admin.<domain>, which asks for that code (the Caddyfile's setup gate).
-# Its first page is the domain and you steps; the rest is this wizard's for now.
-# What the console saves, scripts/console.sh applies: setup web installs the
-# systemd unit that runs it, unless FIREFLY_POCKET_NO_SYSTEMD is set (CI).
+# Its pages are the domain and you steps, then the account and start steps; the
+# rest is this wizard's for now. What the console saves, scripts/console.sh
+# applies: setup web installs the systemd unit that runs it, unless
+# FIREFLY_POCKET_NO_SYSTEMD is set (CI).
 
 set -euo pipefail
 shopt -s inherit_errexit
@@ -50,14 +52,10 @@ source "$REPO_ROOT/scripts/host.sh"
 FP="$REPO_ROOT/scripts/firefly-pocket"
 EB_CERT="$COMPOSE_DIR/secrets/eb/application.crt"
 STEPS="domain you account start bank suggestions alerts backups updates"
-
-# The apps' Firefly III tokens: the setting, and the token's name in Firefly III
-# (Options -> Profile -> OAuth), where each can be revoked alone.
-TOKENS=(
-  "IMPORTER_FIREFLY_TOKEN:Firefly Pocket importer"
-  "SUGGESTER_FIREFLY_TOKEN:Firefly Pocket suggester"
-  "NEXT_WARMUP_FIREFLY_TOKEN:Firefly Pocket warm-up"
-)
+# The account and the apps' tokens (TOKENS, firefly_up, make_tokens), shared
+# with the console's account step.
+# shellcheck source=account.sh
+source "$REPO_ROOT/scripts/account.sh"
 
 # Answers come from the terminal, or else from stdin, which then moves to fd 3:
 # no command the wizard runs can read an answer meant for a later question.
@@ -333,62 +331,16 @@ step_you() {
 }
 
 # -------------------------------------------------------------- account ---
-# bootstrap: scripts/firefly-bootstrap.php inside the app container, its JSON
-# input on stdin. Its answer, the JSON after the marker, on stdout.
-bootstrap() {
-  local code out answer
-  code="$(sed '1{/^<?php/d;}' "$REPO_ROOT/scripts/firefly-bootstrap.php")"
-  out="$(compose exec -T app php -r "$code" 2>&1)" || true
-  answer="$(sed -n 's/^FIREFLY_POCKET_BOOTSTRAP //p' <<<"$out" | tail -n 1)"
-  if [ -z "$answer" ]; then
-    printf '%s\n' "$out" | tail -n 15 >&2
-    die "scripts/firefly-bootstrap.php gave no answer (its output is above)"
-  fi
-  if jq -e 'has("error")' <<<"$answer" >/dev/null; then
-    die "scripts/firefly-bootstrap.php: $(jq -r .error <<<"$answer")"
-  fi
-  printf '%s' "$answer"
-}
-
-# A token is good when Firefly III's API accepts it.
-token_works() {
-  [ -n "$1" ] || return 1
-  printf 'header = "Authorization: Bearer %s"\n' "$1" \
-    | docker run --rm -i --network "$DOCKER_NETWORK" "$CURL_IMAGE" -fsS --max-time 30 --config - \
-        -H 'Accept: application/vnd.api+json' -o /dev/null http://app:8080/api/v1/about/user 2>/dev/null
-}
-
-# registration open|closed: what Firefly III's /register shows. It answers 200
-# either way, so the page is read: open, it has the form with its confirmation field.
-registration() {
-  local page
-  page="$(internal_http http://app:8080/register 60)" || return 1
-  if grep -q 'name="password_confirmation"' <<<"$page"; then [ "$1" = open ]; else [ "$1" = closed ]; fi
-}
-
-wait_for() {
-  local url="$1" what="$2" _
-  for _ in $(seq 60); do
-    internal_http "$url" 10 >/dev/null 2>&1 && return 0
-    sleep 5
-  done
-  die "$what did not answer within five minutes: docker compose --project-directory compose logs $3"
-}
-
+# firefly_up and make_tokens are in account.sh.
 step_account() {
   heading "Your Firefly III account"
   generate
   reload
   say "Postgres and Firefly III first. Caddy, which makes them public, starts only once the account" \
       "exists, so no one else can claim it. The first start sets up the database: a minute or two."
-  compose up -d --no-build --quiet-pull db app
-  wait_for http://app:8080/health "Firefly III" app
-
-  local info users pw="" entry key name mint=() request answer token
-  info="$(bootstrap <<<'{}')"
-  users="$(jq -r .users <<<"$info")"
-  if [ "$users" = 0 ]; then
-    registration open || die "Firefly III's /register shows no registration form, so checking that it closed would prove nothing. This Firefly III needs a newer firefly-pocket-stack."
+  firefly_up
+  local pw=""
+  if [ "$USERS" = 0 ]; then
     say "Its email is $SITE_OWNER. Choose its password: at least 16 characters, Firefly III's minimum." \
         "You sign in to https://$FIREFLY_HOSTNAME with it."
     while :; do
@@ -399,43 +351,11 @@ step_account() {
       [ "$ANSWER" = "$pw" ] && break
       problem "the two differ"
     done
+    ANSWER=""
   else
     ok "Firefly III has its account already, so no password is asked"
   fi
-
-  for entry in "${TOKENS[@]}"; do
-    key="${entry%%:*}"
-    name="${entry#*:}"
-    if [ "$users" != 0 ] && token_works "${!key:-}"; then
-      ok "$key works"
-    else
-      mint+=("$name")
-    fi
-  done
-  if [ "${#mint[@]}" -gt 0 ] || [ -n "$pw" ]; then
-    # The password goes to jq on stdin, and from there on stdin into the container.
-    request="$(printf '%s' "$pw" | jq -Rsc --arg email "$SITE_OWNER" '$ARGS.positional as $t
-      | {email: $email, password: ., tokens: $t}' --args "${mint[@]}")"
-    pw=""
-    answer="$(bootstrap <<<"$request")"
-    request=""
-    [ "$(jq -r .user <<<"$answer")" != created ] || ok "the account $SITE_OWNER is made"
-    for entry in "${TOKENS[@]}"; do
-      key="${entry%%:*}"
-      name="${entry#*:}"
-      token="$(jq -r --arg n "$name" '.tokens[$n].token // empty' <<<"$answer")"
-      [ -n "$token" ] || continue
-      put "$key" "$token" || die "Firefly III made a token for $name that $key does not take"
-      ok "$key: a new token, \"$name\" in Firefly III, valid until $(jq -r --arg n "$name" '.tokens[$n].expires_at' <<<"$answer" | cut -c1-10)"
-    done
-    reload
-  fi
-  for entry in "${TOKENS[@]}"; do
-    key="${entry%%:*}"
-    token_works "${!key:-}" || die "Firefly III does not accept the new $key"
-  done
-  registration closed || die "Firefly III's /register still shows its form"
-  ok "/register is closed: no one else can make an account"
+  make_tokens "$pw"
 }
 
 # ---------------------------------------------------------------- start ---
@@ -515,8 +435,9 @@ step_web() {
     say "Change an answer with scripts/firefly-pocket setup <step> ($STEPS)."
     return 0
   fi
-  say "The console asks the rest, at https://admin.<domain>. It needs the domain first, and an" \
-      "email for Let's Encrypt, so Caddy can get its certificate."
+  say "The console asks for the rest of the server and makes your Firefly III account, at" \
+      "https://admin.<domain>. It needs the domain first, and an email for Let's Encrypt, so Caddy" \
+      "can get its certificate."
   step_domain
   heading "You"
   ask_email
@@ -540,7 +461,8 @@ step_web() {
 
   heading "Open https://$ADMIN_HOSTNAME"
   say "and enter the setup code:" "" "    $SETUP_CODE" "" \
-      "Run this again to see it. It works until your Firefly III account exists."
+      "Run this again to see it. It works until your Firefly III account exists, which the console" \
+      "makes. Then scripts/firefly-pocket setup for the rest: Enter keeps what the console saved."
   if [ "${#SKIPPED[@]}" -gt 0 ]; then
     say "" "Left for later:"
     printf '     - %s\n' "${SKIPPED[@]}"
@@ -891,7 +813,7 @@ case "${1:-}" in
     step_web
     ;;
   *)
-    sed -n '3,39s/^# \{0,1\}//p' "${BASH_SOURCE[0]}" >&2
+    sed -n '3,42s/^# \{0,1\}//p' "${BASH_SOURCE[0]}" >&2
     exit 2
     ;;
 esac
