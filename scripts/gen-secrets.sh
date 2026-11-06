@@ -201,7 +201,7 @@ if [ -n "$BASIC_AUTH_PLAINTEXT" ]; then
   Importer UI login — SAVE THIS NOW, it is not stored anywhere
   in plaintext and cannot be recovered.
 
-      URL:      https://<your IMPORT_HOSTNAME>
+      URL:      https://import.<DOMAIN>, or your IMPORT_HOSTNAME
       username: (whatever IMPORT_AUTH_USER is set to)
       password: $BASIC_AUTH_PLAINTEXT
 
@@ -212,7 +212,7 @@ fi
 cat <<'EOF'
 
 Still to fill in by hand (see README):
-  - FIREFLY_HOSTNAME / NEXT_HOSTNAME / IMPORT_HOSTNAME / LEGAL_HOSTNAME, ACME_EMAIL, SITE_OWNER, TZ
+  - DOMAIN, ACME_EMAIL, SITE_OWNER, TZ
   - IMPORTER_FIREFLY_TOKEN / SUGGESTER_FIREFLY_TOKEN  (stage 2, after registering)
   - ENABLE_BANKING_APP_ID  + compose/secrets/eb/private.pem
   - ANTHROPIC_API_KEY

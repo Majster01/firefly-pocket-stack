@@ -50,6 +50,14 @@ load_env() {
 
 load_env
 
+# The hostnames as compose derives them (docker-compose.yml, the caddy
+# service): <name>.DOMAIN unless .env sets one on its own. Empty when neither is
+# set; compose then refuses to start, naming DOMAIN.
+export FIREFLY_HOSTNAME="${FIREFLY_HOSTNAME:-${DOMAIN:+firefly.$DOMAIN}}"
+export NEXT_HOSTNAME="${NEXT_HOSTNAME:-${DOMAIN:+app.$DOMAIN}}"
+export IMPORT_HOSTNAME="${IMPORT_HOSTNAME:-${DOMAIN:+import.$DOMAIN}}"
+export LEGAL_HOSTNAME="${LEGAL_HOSTNAME:-${DOMAIN:+legal.$DOMAIN}}"
+
 # Firefly Pocket's Web Push endpoint, reached on the internal network (Caddy refuses
 # /api/internal/* from outside). Only used when NEXT_NOTIFY_TOKEN is set.
 NEXT_NOTIFY_URL="${NEXT_NOTIFY_URL:-http://next:80/api/internal/notify}"

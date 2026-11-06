@@ -64,10 +64,14 @@ services:
       - caddy_config:/config
     environment:
       ACME_EMAIL: ${ACME_EMAIL:?set ACME_EMAIL in .env}
-      FIREFLY_HOSTNAME: ${FIREFLY_HOSTNAME:?set FIREFLY_HOSTNAME in .env}
-      NEXT_HOSTNAME: ${NEXT_HOSTNAME:?set NEXT_HOSTNAME in .env}
-      IMPORT_HOSTNAME: ${IMPORT_HOSTNAME:?set IMPORT_HOSTNAME in .env}
-      LEGAL_HOSTNAME: ${LEGAL_HOSTNAME:?set LEGAL_HOSTNAME in .env}
+      # Each host is <name>.DOMAIN unless .env sets it on its own. The same
+      # defaults are written out wherever a URL needs a host below, and in
+      # scripts/lib.sh for the scripts. DOMAIN is needed only while one of
+      # the four is not set, so a server with all four keeps working without.
+      FIREFLY_HOSTNAME: ${FIREFLY_HOSTNAME:-firefly.${DOMAIN:?set DOMAIN in .env}}
+      NEXT_HOSTNAME: ${NEXT_HOSTNAME:-app.${DOMAIN:?set DOMAIN in .env}}
+      IMPORT_HOSTNAME: ${IMPORT_HOSTNAME:-import.${DOMAIN:?set DOMAIN in .env}}
+      LEGAL_HOSTNAME: ${LEGAL_HOSTNAME:-legal.${DOMAIN:?set DOMAIN in .env}}
       IMPORT_AUTH_USER: ${IMPORT_AUTH_USER:?set IMPORT_AUTH_USER in .env}
       IMPORT_AUTH_HASH: ${IMPORT_AUTH_HASH:?run scripts/gen-secrets.sh}
       # Filled into the legal pages (compose/legal/*.html are Caddy templates).
@@ -133,7 +137,7 @@ services:
       # Must be EXACTLY 32 characters or Firefly III refuses to boot.
       APP_KEY: ${FIREFLY_APP_KEY:?run scripts/gen-secrets.sh}
       # Wrong value here breaks redirects, OAuth and the PAT flow.
-      APP_URL: https://${FIREFLY_HOSTNAME}
+      APP_URL: https://${FIREFLY_HOSTNAME:-firefly.${DOMAIN}}
       TZ: ${TZ:-Etc/UTC}
       # Behind Caddy: trust the forwarded proto/host headers.
       TRUSTED_PROXIES: "**"
@@ -192,7 +196,7 @@ services:
     networks: [fireflyx]
     environment:
       APP_KEY: ${NEXT_APP_KEY:?run scripts/gen-secrets.sh}
-      APP_URL: https://${NEXT_HOSTNAME:?set NEXT_HOSTNAME in .env}
+      APP_URL: https://${NEXT_HOSTNAME:-app.${DOMAIN}}
       # Firefly III on this network, as the importer and the suggester reach
       # it, not out through Caddy and back. Only Pocket's server calls it: the
       # browser talks to Pocket's own /api, never to Firefly III.
@@ -257,7 +261,7 @@ services:
     environment:
       # Internal hop to Firefly III; VANITY_URL is what it renders in links.
       FIREFLY_III_URL: http://app:8080
-      VANITY_URL: https://${FIREFLY_HOSTNAME}
+      VANITY_URL: https://${FIREFLY_HOSTNAME:-firefly.${DOMAIN}}
       FIREFLY_III_ACCESS_TOKEN: ${IMPORTER_FIREFLY_TOKEN}
       TZ: ${TZ:-Etc/UTC}
       TRUSTED_PROXIES: "**"
@@ -327,11 +331,8 @@ services:
       # its host. The user then lands back in Firefly Pocket, on its
       # /bank-connections pages — the only place the callback ever redirects
       # to.
-      FIREFLY_POCKET_CALLBACK_URL: https://${NEXT_HOSTNAME}/eb-callback
-      FIREFLY_POCKET_APP_URL: https://${NEXT_HOSTNAME}
-      # The old name of FIREFLY_POCKET_APP_URL, for importer builds before
-      # Majster01/data-importer eb731d7. Hostnames and routing step 6 drops it.
-      FIREFLYX_PICO_URL: https://${NEXT_HOSTNAME}
+      FIREFLY_POCKET_CALLBACK_URL: https://${NEXT_HOSTNAME:-app.${DOMAIN}}/eb-callback
+      FIREFLY_POCKET_APP_URL: https://${NEXT_HOSTNAME:-app.${DOMAIN}}
       # Banks book late; duplicate detection discards the overlap.
       FIREFLYX_LOOKBACK_DAYS: ${IMPORT_LOOKBACK_DAYS:-5}
       # Per-night import history for Firefly Pocket's System status page (README).

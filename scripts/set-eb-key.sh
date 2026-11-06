@@ -144,7 +144,8 @@ if [ "$ENVIRONMENT" = "SANDBOX" ]; then
   restricted mode by linking your own accounts in the Enable Banking
   control panel (free for personal use). A new application means a
   new ID and a new PEM — re-run this script with both, and register
-  the redirect URL https://<IMPORT_HOSTNAME>/eb-callback on it.
+  both redirect URLs on it (README "Connect your bank"):
+  https://app.<DOMAIN>/eb-callback and https://import.<DOMAIN>/eb-callback.
   ------------------------------------------------------------------
 EOF
 fi

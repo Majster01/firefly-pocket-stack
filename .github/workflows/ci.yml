@@ -53,6 +53,30 @@ jobs:
       - name: docker compose config
         run: docker compose --project-directory compose config -q
 
+      # .env.example sets only DOMAIN=example.com. A name set on its own wins
+      # (the shell's variables override .env), and with all four set DOMAIN
+      # can be empty, as on a server set up before DOMAIN existed.
+      - name: The hostnames come from DOMAIN, each overridable
+        run: |
+          hosts() {
+            docker compose --project-directory compose config --format json | jq -r '
+              [.services.caddy.environment | .FIREFLY_HOSTNAME, .NEXT_HOSTNAME, .IMPORT_HOSTNAME, .LEGAL_HOSTNAME]
+              + [.services.app.environment.APP_URL, .services.next.environment.APP_URL]
+              + [.services.importer.environment | .VANITY_URL, .FIREFLY_POCKET_CALLBACK_URL, .FIREFLY_POCKET_APP_URL]
+              | join(" ")'
+          }
+          expect() {
+            [ "$1" = "$2" ] || { printf 'expected: %s\n     got: %s\n' "$2" "$1"; exit 1; }
+          }
+          expect "$(hosts)" "firefly.example.com app.example.com import.example.com legal.example.com https://firefly.example.com https://app.example.com https://firefly.example.com https://app.example.com/eb-callback https://app.example.com"
+          expect "$(NEXT_HOSTNAME=next.example.org hosts)" "firefly.example.com next.example.org import.example.com legal.example.com https://firefly.example.com https://next.example.org https://firefly.example.com https://next.example.org/eb-callback https://next.example.org"
+          expect "$(DOMAIN= FIREFLY_HOSTNAME=f.example.net NEXT_HOSTNAME=n.example.net IMPORT_HOSTNAME=i.example.net LEGAL_HOSTNAME=l.example.net hosts)" "f.example.net n.example.net i.example.net l.example.net https://f.example.net https://n.example.net https://f.example.net https://n.example.net/eb-callback https://n.example.net"
+          if DOMAIN= NEXT_HOSTNAME=n.example.net docker compose --project-directory compose config -q 2>err.txt; then
+            echo "compose started with a hostname missing and no DOMAIN"; exit 1
+          fi
+          grep -q 'set DOMAIN in .env' err.txt || { cat err.txt; exit 1; }
+          echo "derived, overridden, and DOMAIN not needed once all four are set"
+
   suggester:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
