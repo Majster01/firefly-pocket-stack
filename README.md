@@ -65,86 +65,70 @@ Lock `ssh_source_ips` to your own address if it is static — it is the single h
 *.<domain>   ->  <ip>
 ```
 
-It covers the four names the stack answers on: `firefly.`, `app.` (Firefly Pocket), `import.` and `legal.`. `<domain>` can be a subdomain of yours, e.g. `money.example.com` for `app.money.example.com` and the rest; it is what you set as `DOMAIN` below. Caddy still gets a certificate for each name, not a wildcard one, so it needs no DNS API token. A provider without wildcard records takes the four as A records instead. Each name can also be set on its own (`FIREFLY_HOSTNAME`, `NEXT_HOSTNAME`, `IMPORT_HOSTNAME`, `LEGAL_HOSTNAME`, with `config set` below), e.g. to keep the one a server already uses; then its record is up to you.
+It covers the four names the stack answers on: `firefly.`, `app.` (Firefly Pocket), `import.` and `legal.`. `<domain>` can be a subdomain of yours, e.g. `money.example.com` for `app.money.example.com` and the rest; it is the domain you give the setup wizard (`DOMAIN`). Caddy still gets a certificate for each name, not a wildcard one, so it needs no DNS API token. A provider without wildcard records takes the four as A records instead. Each name can also be set on its own (`FIREFLY_HOSTNAME`, `NEXT_HOSTNAME`, `IMPORT_HOSTNAME`, `LEGAL_HOSTNAME`, with `scripts/firefly-pocket config set`), e.g. to keep the one a server already uses; then its record is up to you.
 
 Optionally add a CAA record, so no certificate authority other than Let's Encrypt may issue for the domain: `<domain>  CAA  0 issue "letsencrypt.org"`.
 
-**Wait until the names actually resolve before continuing** (`dig +short app.<domain>` prints the IP). Caddy requests Let's Encrypt certificates on first start; if DNS is not live the challenge fails and nothing comes up.
+**The names must resolve before the stack starts** (`dig +short app.<domain>` prints the IP): Caddy requests Let's Encrypt certificates on first start, and if DNS is not live the challenge fails. The wizard's first step checks each name, and waits for you while it does not point at the server.
 
-## 3. Configure
+## 3. Set it up
 
-The server fetches this repository over HTTPS. It is public, so the server needs no key. From your laptop, check out `master` into `/opt/fireflyx`:
+The server fetches this repository over HTTPS. It is public, so the server needs no key. From your laptop, check out `master` into `/opt/fireflyx`, then run the setup wizard on the server:
 
 ```bash
 ssh fireflyx@<ip> 'bash -s' < scripts/install-deploy-agent.sh   # checks out /opt/fireflyx
-
-ssh fireflyx@<ip>
-cd /opt/fireflyx
-
-scripts/firefly-pocket config set DOMAIN example.com       # what the wildcard record covers
-scripts/firefly-pocket config set ACME_EMAIL you@example.com
-scripts/firefly-pocket config set SITE_OWNER you@example.com
-scripts/firefly-pocket config set TZ Europe/Ljubljana
-./scripts/gen-secrets.sh          # generates every secret + the importer password
+ssh -t fireflyx@<ip> /opt/fireflyx/scripts/firefly-pocket setup
 ```
 
-Each value is checked as it is set, and a wrong one is refused with what it should look like. The settings live in `compose/config.json` and, one file per secret, in `compose/secrets/env/`; `compose/.env` is written from them, so it is never edited by hand ([Settings](#settings)). `compose/.env.example` explains every setting.
+It asks only for what you have to give, checks each answer as you give it, and keeps it in the settings store ([Settings](#settings)). Everything else is generated, the Firefly III tokens included, and nobody opens `compose/.env`:
 
-`gen-secrets.sh` prints the importer's basic-auth password **once** — save it now, it is not recoverable. The script is safe to re-run; it only fills values that are empty and never overwrites an existing secret.
+| Step | It asks for | And checks |
+|---|---|---|
+| `domain` | the domain | each of the four names resolves to this server |
+| `you` | your email (Firefly III's, Let's Encrypt's, the push services' and the legal pages'), your name for the legal pages, the timezone | the format; then every secret is generated |
+| `account` | a password for your Firefly III account, at least 16 characters | the account and a token per app are made inside Firefly III, then `/register` is closed |
+| `start` | nothing | every service runs, and each name gets its certificate |
+| `bank` | the Enable Banking application ID, once you have registered the application with the certificate it made | a request signed with the key succeeds |
+| `suggestions` | an Anthropic or Gemini API key | the provider lists the model for that key |
+| `alerts` | an ntfy topic (it makes one), a healthchecks.io API key | a test alert arrives; both checks are made, with their schedules |
+| `backups` | a restic repository, and its S3 keys | it opens, or is created; its password is shown to keep |
+| `updates` | whether to turn on the deploy agent | it runs `install-deploy-agent.sh` |
+
+Only the first four are needed. Skip any other with Enter and run it later with `scripts/firefly-pocket setup <step>`; the same command changes an answer, Enter keeping what is there. A step run on its own ends with `start`, which on a server with the deploy agent is `scripts/deploy.sh --force`.
+
+Keep two things the run shows: the bank importer's password (basic auth for its own web page, printed once and not recoverable; rarely needed, since Firefly Pocket links banks), and, with backups, the restic password.
+
+**Nothing is public before the account exists.** Until Firefly III's first account exists, anyone who reaches it can claim it. So the wizard starts only Postgres and Firefly III, makes the account and the tokens inside the `app` container with `scripts/firefly-bootstrap.php` (the account the way `/register` makes it, and one Personal Access Token per app, named `Firefly Pocket importer`, `Firefly Pocket suggester` and `Firefly Pocket warm-up` under Options → Profile → OAuth, so each can be revoked alone), checks that `/register` shows no form any more, and only then starts Caddy. There is no registration flag to set: Firefly III 6.x has no `ALLOW_REGISTRATION` option; `single_user_mode` lives in the database, defaults to true, and `allowedToRegister()` refuses as soon as one user exists. The tokens last a year, as the ones made by hand do; `setup account` replaces any that stopped working.
+
+Then:
+
+1. Sign in at `https://firefly.<domain>` and turn on two-factor authentication under Options → Profile. If two people share this account (Firefly III allows only one), both add the same TOTP secret to their authenticator app.
+2. Make a token for each device you will use Firefly Pocket on: Options → Profile → OAuth → **Personal Access Tokens** → Create, named after the device, so a lost phone is revoked alone. Open `https://app.<domain>`, paste it, and add it to the home screen: this is the URL you use day to day.
+
+Behind NAT the DNS check can only see that each name resolves; the certificates check the rest. The wizard reads its answers from stdin when that is not a terminal, one line each: that is how the boot test runs it (`scripts/boot-test.sh`), so CI sets up a new server on every PR, the Firefly III part included.
+
+**By hand.** The wizard runs these, and they still work on their own: `scripts/firefly-pocket config set <KEY> <value>` for any setting (`-` reads the value without showing it), `./scripts/gen-secrets.sh` for every generated one (it prints the importer password once, and never overwrites a value), `scripts/set-eb-key.sh` for an Enable Banking key made elsewhere. `compose/.env.example` explains every setting.
 
 A private fork is fetched with a read-only deploy key instead. Give the script the fork's SSH address: `ssh fireflyx@<ip> 'REPO_URL=git@github.com:<owner>/<repo>.git bash -s' < scripts/install-deploy-agent.sh`. Its first run prints the key; add it under the fork's **Settings → Deploy keys** (no write access), then run the same command again to check out `master`.
 
-## 4. Bootstrap — stage 1
+## 4. Connect your bank
 
-Three services need a Firefly III Personal Access Token, and those cannot exist until Firefly III is running and you have registered. So this is necessarily two passes.
+`scripts/firefly-pocket setup bank` does the Enable Banking part (it is a step of the full run too):
 
-```bash
-cd compose
-docker compose up -d caddy db app
-docker compose logs -f app        # wait for migrations to finish
-```
+1. It makes a private key and a certificate on the server. The key never leaves it; the certificate is `compose/secrets/eb/application.crt`.
+2. In the Enable Banking control panel you register a **production** application with that certificate as its public key, and two **redirect URLs**, exactly so: `https://app.<domain>/eb-callback`, where links started from Firefly Pocket come back, and `https://import.<domain>/eb-callback`, for the importer's own UI (your `NEXT_HOSTNAME` and `IMPORT_HOSTNAME`, where you set those). Caddy sends a callback whose state starts with `fx-` to the importer fork on either host. Its privacy policy and terms are `https://legal.<domain>/privacy` and `/terms`.
+3. You paste back the application ID. It asks Enable Banking with a request signed by the key whether the application is sandbox or production, and whether both redirect URLs are registered (`scripts/set-eb-key.sh`, which also takes a PEM made elsewhere: `scripts/set-eb-key.sh <private.pem> <application-id>`).
 
-Then in a browser:
+Then link the bank in Firefly Pocket: **Bank connections → Connect a bank** ([Adding another bank account](#adding-another-bank-account)). The importer's own UI is the fallback when Firefly Pocket is not reachable:
 
-1. Open `https://firefly.<domain>` and **register your account**. Do this promptly — until the first account exists, anyone who finds the host can claim it.
-2. Confirm registration closed itself: `https://firefly.<domain>/register` should now read **"Registration is currently not available"** with no form. It still returns HTTP 200, so judge by the page content, not the status code.
-3. Options → Profile → OAuth → **Personal Access Tokens** → create separate tokens for the importer, the suggester and **each device** you will use Firefly Pocket on (named after the device), so any one can be revoked alone.
-4. Options → Profile → **Enable two-factor authentication** for the web login. If two people share this account (Firefly III allows only one), both add the same TOTP secret to their authenticator app.
-
-> There is no registration flag to set. Firefly III 6.x has no `ALLOW_REGISTRATION` option — `single_user_mode` lives in the database, defaults to true, and `allowedToRegister()` refuses as soon as one user exists. Verified against 6.6.6 by registering and then failing to register again.
-
-## 5. Bootstrap — stage 2
-
-Set two of the tokens, and the suggester's API key. With `-` each is read without being shown, and stays out of the shell's history:
-
-```bash
-scripts/firefly-pocket config set IMPORTER_FIREFLY_TOKEN -     # paste it, then Enter
-scripts/firefly-pocket config set SUGGESTER_FIREFLY_TOKEN -
-scripts/firefly-pocket config set ANTHROPIC_API_KEY -
-```
-
-(Firefly Pocket's token is not set here — you paste it into Firefly Pocket itself.)
-
-```bash
-docker compose up -d
-```
-
-Then open `https://app.<domain>` and paste that device's token when it asks. Add it to your phone's home screen — this is the URL you will actually use day to day.
-
-## 6. Connect your bank
-
-1. In the Enable Banking control panel, create an application and download the **PEM private key**.
-2. Put it at `compose/secrets/eb/private.pem` (gitignored), then run `scripts/set-eb-key.sh compose/secrets/eb/private.pem <application-id>`. It checks the key, sets `ENABLE_BANKING_PRIVATE_KEY` and `ENABLE_BANKING_APP_ID`, and asks Enable Banking whether the application is sandbox or production.
-3. Register two **redirect URLs** in their portal, exactly so: `https://app.<domain>/eb-callback`, where links started from Firefly Pocket come back, and `https://import.<domain>/eb-callback`, for the importer's own UI (your `NEXT_HOSTNAME` and `IMPORT_HOSTNAME`, where you set those). Caddy sends a callback whose state starts with `fx-` to the importer fork on either host.
-4. `docker compose up -d importer`
-5. Open `https://import.<domain>` (basic auth) and **run one import interactively**: link the bank, map each bank account to a Firefly asset account, configure duplicate detection.
-6. Download the resulting config and bring it into the importer's database as a **connection**. Only its bank, Enable Banking session and account mapping are kept; every other setting comes from the shared, committed `config/importer-base.json`, so all banks import the same way. The command refuses a config whose settings differ from the base, rather than silently changing how that bank imports:
+1. Open `https://import.<domain>` (basic auth) and **run one import interactively**: link the bank, map each bank account to a Firefly asset account, configure duplicate detection.
+2. Download the resulting config and bring it into the importer's database as a **connection**. Only its bank, Enable Banking session and account mapping are kept; every other setting comes from the shared, committed `config/importer-base.json`, so all banks import the same way. The command refuses a config whose settings differ from the base, rather than silently changing how that bank imports:
    ```bash
    scp nlb.json <server>:/tmp/nlb.json
    ssh <server> "cd /opt/fireflyx/compose && docker compose exec -T importer php artisan fireflyx:connections:adopt - --name nlb < /tmp/nlb.json && rm /tmp/nlb.json"
    ```
    The config arrives on stdin because the importer runs as `www-data` and need not be able to read your files. `--name` is the connection's name (`a-z`, `0-9`, `-`) and the name of its rendered `<name>.json`.
-7. Check what tonight's import will use:
+3. Check what tonight's import will use:
    ```bash
    ssh <server> "cd /opt/fireflyx/compose && docker compose exec importer php artisan fireflyx:render --dry-run 2>/dev/null"
    ```
@@ -162,17 +146,17 @@ It runs on the server, so you can close Firefly Pocket meanwhile. Only one manua
 
 **Banks limit unattended requests** (PSD2 allows about four a day per account when you are not present at the bank), and the nightly run uses one, so keep manual imports for when you need them.
 
-Steps 5–7 above (the importer UI plus `fireflyx:connections:adopt`) still work and are the fallback when Firefly Pocket is not reachable. Firefly Pocket lists, renews and removes connections too; the design is in `docs/design/bank-link.md`.
+The importer's UI plus `fireflyx:connections:adopt` (above) still work and are the fallback when Firefly Pocket is not reachable. Firefly Pocket lists, renews and removes connections too; the design is in `docs/design/bank-link.md`.
 
 One `/autoimport` call imports every rendered `*.json`: the importer's `AutoImports::getFiles()` scans the directory and treats each config as its own job, each inside its own `try/catch`, so an expired consent on one bank does not stop the others.
 
-## 7. Category suggestions (review in Firefly Pocket)
+## 5. Category suggestions (review in Firefly Pocket)
 
 The **category-suggester** (`services/category-suggester`, compose service `suggester`) is the reviewed alternative to letting an LLM set categories directly. For uncategorized withdrawals it asks Claude — with web search for merchants it does not recognise — which category fits and which rule trigger would catch the merchant next time, then writes that as an **inactive** rule into the `Suggestions` rule group. Firefly Pocket lists them; approving one moves its triggers into `Category: {category}` in `Categorization`. Nothing is categorized until you approve.
 
 Both sides follow one contract, [`docs/rule-suggestions.md`](docs/rule-suggestions.md): rule format, metadata, and what happens on approve / set category / reject.
 
-Setup: the suggester's Personal Access Token as `SUGGESTER_FIREFLY_TOKEN` (step 5), and `ANTHROPIC_API_KEY` from an account with credit. The model reads each **category's notes** (Firefly → Categories → edit) as your definition of what belongs there, so a one-line definition per category steers it far better than the name alone.
+Setup: `scripts/firefly-pocket setup suggestions` takes `ANTHROPIC_API_KEY`, from an account with credit, or a Gemini key; the suggester's own Firefly III token, `SUGGESTER_FIREFLY_TOKEN`, comes from the account step. The model reads each **category's notes** (Firefly → Categories → edit) as your definition of what belongs there, so a one-line definition per category steers it far better than the name alone.
 
 ```bash
 cd compose
@@ -188,18 +172,14 @@ Suggestions you reject in Firefly Pocket are remembered (SQLite in the `suggeste
 
 Categorization rules live **only in Firefly** (the `Categorization` group). Change them there or by approving suggestions in Firefly Pocket; there is no seed file to keep in sync.
 
-## 8. Schedule everything
+## 6. Alerts and the schedule
 
-Start the deploy agent, from the laptop. Its first run deploys `master` and installs the crontab, as every deploy does:
+The wizard's last step, `updates`, starts the deploy agent ([Deploying](#deploying)), whose first run deploys `master` and installs the crontab, as every deploy does. On its own: `scripts/firefly-pocket setup updates`, or from the laptop `ssh fireflyx@<ip> 'bash -s' < scripts/install-deploy-agent.sh`; `ssh fireflyx@<ip> 'crontab -l'` a few minutes later shows the jobs.
 
-```bash
-ssh fireflyx@<ip> 'bash -s' < scripts/install-deploy-agent.sh   # now compose/.env exists: starts the timer
-ssh fireflyx@<ip> 'crontab -l'                                   # a few minutes later
-```
+`scripts/firefly-pocket setup alerts` sets the two alert channels that do not depend on Firefly Pocket. **This system's most likely failure mode is silent** — the bank consent expires, imports stop, and nothing looks broken. Alerting is what turns that into something you find out about.
 
-Set `NTFY_URL` first, `scripts/firefly-pocket config set NTFY_URL -` (and enable [push alerts in Firefly Pocket](#push-alerts-in-firefly-pocket) if you want them as native notifications). **This system's most likely failure mode is silent** — the bank consent expires, imports stop, and nothing looks broken. Alerting is what turns that into something you find out about.
-
-Then set the dead man's switch, `HEALTHCHECK_NIGHTLY_URL` and `HEALTHCHECK_BACKUP_URL`, the same way (`.env.example` says what each is). Every other alert is sent *from* this machine, so if the machine is down or cron has stopped, there is only silence. One check per job at [healthchecks.io](https://healthchecks.io), with the schedule below and your timezone, alerts you when the ping does not arrive. Only "ok", "failed" and a one-line reason are sent, never transaction data. A backup that never left the machine pings as failed on purpose.
+- **ntfy** (`NTFY_URL`): the wizard makes a long random topic on ntfy.sh, since anyone who knows a topic can read it, and sends a test once you have subscribed in the ntfy app. Your own ntfy server's topic works too. Every alert goes there and to the [Firefly Pocket app](#push-alerts-in-firefly-pocket).
+- **The dead man's switch** (`HEALTHCHECK_NIGHTLY_URL`, `HEALTHCHECK_BACKUP_URL`). Every other alert is sent *from* this machine, so if the machine is down or cron has stopped, there is only silence. Given a healthchecks.io API key (the project's read-write key, used once and not kept), the wizard makes one check per job with the schedule below in your timezone and an hour's grace, and pings each once; healthchecks.io then mails you when a ping does not arrive. Only "ok", "failed" and a one-line reason are sent, never transaction data. A backup that never left the machine pings as failed on purpose.
 
 | When | What |
 |---|---|
@@ -261,7 +241,7 @@ The log check exists because `/autoimport` answers **HTTP 200 even when the impo
 Work through these in order — each gates the next.
 
 - [ ] All three subdomains serve valid certificates
-- [ ] Register, then `docker compose restart app`, and confirm your account survives
+- [ ] Sign in, then `docker compose restart app`, and confirm your account survives
 - [ ] `/register` shows "Registration is currently not available" (returns 200 — check the page, not the status)
 - [ ] Attach a receipt to a transaction, `docker compose up -d --force-recreate app`, confirm it still downloads
 - [ ] Firefly Pocket works **on your actual phone**; a transaction created there appears in Firefly III
@@ -408,7 +388,7 @@ your change ─► PR ─► CI ─► you merge ──────────�
                                        server, every 2 minutes: git fetch ─► scripts/deploy.sh
 ```
 
-Every PR into `master` runs CI (`.github/workflows/ci.yml`), seven checks: `shellcheck` on every script, `compose` (the settings store's tests, `scripts/config-test.sh`, then `docker compose config` with a hand-edited `.env` made by `scripts/gen-secrets.sh`, as a server from before the store has one), `suggester` (its tests, inside the image the server runs, built for `linux/amd64` and, under QEMU, `linux/arm64`), and `boot` (`scripts/boot-test.sh`: the whole stack from scratch with throwaway values, set up through the settings store as a new server is, a first user and token, then the deploy's own smoke test; on a pin PR that is the new image booting before it reaches the server), `bundle` (the release bundle below, assembled but not pushed, then compared with the checkout by `scripts/agent.sh compare`), and `upgrade (stable)` and `upgrade (latest)` (`scripts/upgrade-test.sh`: that published bundle booted with its own boot test, then upgraded to the PR the way a deploy does it, with the old `.env` (and settings store, once it has one) and `gen-secrets.sh` for anything new, smoke-tested, and the token made on the old version checked against Firefly III; a hand-edited `.env` is then moved into the store with `config import`, and `up -d` must recreate nothing; from `latest`, that is the very upgrade the merge causes on your server). Before the first release, `upgrade (stable)` passes with a note that there is nothing to upgrade from. Merge only when all seven are green. Pins are PRs too: *Pin fork image* opens one per service as the pin app (the *pin PR* above), and it merges itself once the checks pass. `master` takes no direct pushes at all ([GitHub settings](#github-settings-once)).
+Every PR into `master` runs CI (`.github/workflows/ci.yml`), seven checks: `shellcheck` on every script, `compose` (the settings store's tests, `scripts/config-test.sh`, then `docker compose config` with a hand-edited `.env` made by `scripts/gen-secrets.sh`, as a server from before the store has one), `suggester` (its tests, inside the image the server runs, built for `linux/amd64` and, under QEMU, `linux/arm64`), and `boot` (`scripts/boot-test.sh`: the whole stack from scratch, set up by `scripts/firefly-pocket setup` as a new server is, with throwaway answers piped in: the account and a token per app made inside Firefly III, the account step run again to show it keeps them, then the deploy's own smoke test; on a pin PR that is the new image booting before it reaches the server, Firefly III's bootstrap included), `bundle` (the release bundle below, assembled but not pushed, then compared with the checkout by `scripts/agent.sh compare`), and `upgrade (stable)` and `upgrade (latest)` (`scripts/upgrade-test.sh`: that published bundle booted with its own boot test, then upgraded to the PR the way a deploy does it, with the old `.env` (and settings store, once it has one) and `gen-secrets.sh` for anything new, smoke-tested, and the token made on the old version checked against Firefly III; a hand-edited `.env` is then moved into the store with `config import`, and `up -d` must recreate nothing; from `latest`, that is the very upgrade the merge causes on your server). Before the first release, `upgrade (stable)` passes with a note that there is nothing to upgrade from. Merge only when all seven are green. Pins are PRs too: *Pin fork image* opens one per service as the pin app (the *pin PR* above), and it merges itself once the checks pass. `master` takes no direct pushes at all ([GitHub settings](#github-settings-once)).
 
 **The release bundle.** Every merge into `master` also publishes `ghcr.io/majster01/firefly-pocket-stack` (`.github/workflows/publish.yml`, built by `scripts/make-bundle.sh`): the files a server runs, at their paths in this repository, with every image in compose pinned to the digest its tag named at that moment, and a `release.json` that lists the version, the commit and each component with its digest and whether it migrates a database. It is tagged `sha-<commit>` for every merge and `latest` for the newest. `master` builds are numbered after the next minor release, `1.0.0-dev.<n>` until the first one. Your server still deploys from git; the server agent will move it onto the bundle, and until then checks each bundle against the deploy in shadow mode (below).
 

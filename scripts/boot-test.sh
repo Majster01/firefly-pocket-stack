@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # Boot the whole stack from scratch with throwaway values, the way a new server
-# is set up (README "Configure" and "Bootstrap"), and check it with the
+# is set up (README "Set it up"), and check it with the
 # deploy's own smoke test. CI runs it on every PR (Release pipeline step 4), so
 # a change that would leave the server unable to start fails its PR instead.
 #

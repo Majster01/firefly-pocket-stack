@@ -163,7 +163,8 @@ if [ "$ENVIRONMENT" = "SANDBOX" ]; then
   restricted mode by linking your own accounts in the Enable Banking
   control panel (free for personal use). A new application means a
   new ID and a new PEM — re-run this script with both, and register
-  both redirect URLs on it (README "Connect your bank"):
+  both redirect URLs on it (README "Connect your bank"; or let
+  scripts/firefly-pocket setup bank make the key and certificate):
   https://app.<DOMAIN>/eb-callback and https://import.<DOMAIN>/eb-callback.
   ------------------------------------------------------------------
 EOF
