@@ -65,7 +65,7 @@ Lock `ssh_source_ips` to your own address if it is static — it is the single h
 *.<domain>   ->  <ip>
 ```
 
-It covers the four names the stack answers on: `firefly.`, `app.` (Firefly Pocket), `import.` and `legal.`. `<domain>` can be a subdomain of yours, e.g. `money.example.com` for `app.money.example.com` and the rest; it is what you set as `DOMAIN` below. Caddy still gets a certificate for each name, not a wildcard one, so it needs no DNS API token. A provider without wildcard records takes the four as A records instead. Each name can also be set on its own in `.env` (`FIREFLY_HOSTNAME`, `NEXT_HOSTNAME`, `IMPORT_HOSTNAME`, `LEGAL_HOSTNAME`), e.g. to keep the one a server already uses; then its record is up to you.
+It covers the four names the stack answers on: `firefly.`, `app.` (Firefly Pocket), `import.` and `legal.`. `<domain>` can be a subdomain of yours, e.g. `money.example.com` for `app.money.example.com` and the rest; it is what you set as `DOMAIN` below. Caddy still gets a certificate for each name, not a wildcard one, so it needs no DNS API token. A provider without wildcard records takes the four as A records instead. Each name can also be set on its own (`FIREFLY_HOSTNAME`, `NEXT_HOSTNAME`, `IMPORT_HOSTNAME`, `LEGAL_HOSTNAME`, with `config set` below), e.g. to keep the one a server already uses; then its record is up to you.
 
 Optionally add a CAA record, so no certificate authority other than Let's Encrypt may issue for the domain: `<domain>  CAA  0 issue "letsencrypt.org"`.
 
@@ -81,10 +81,14 @@ ssh fireflyx@<ip> 'bash -s' < scripts/install-deploy-agent.sh   # checks out /op
 ssh fireflyx@<ip>
 cd /opt/fireflyx
 
-cp compose/.env.example compose/.env
-$EDITOR compose/.env              # DOMAIN, ACME_EMAIL, SITE_OWNER, TZ
+scripts/firefly-pocket config set DOMAIN example.com       # what the wildcard record covers
+scripts/firefly-pocket config set ACME_EMAIL you@example.com
+scripts/firefly-pocket config set SITE_OWNER you@example.com
+scripts/firefly-pocket config set TZ Europe/Ljubljana
 ./scripts/gen-secrets.sh          # generates every secret + the importer password
 ```
+
+Each value is checked as it is set, and a wrong one is refused with what it should look like. The settings live in `compose/config.json` and, one file per secret, in `compose/secrets/env/`; `compose/.env` is written from them, so it is never edited by hand ([Settings](#settings)). `compose/.env.example` explains every setting.
 
 `gen-secrets.sh` prints the importer's basic-auth password **once** — save it now, it is not recoverable. The script is safe to re-run; it only fills values that are empty and never overwrites an existing secret.
 
@@ -111,12 +115,12 @@ Then in a browser:
 
 ## 5. Bootstrap — stage 2
 
-Paste two of the tokens into `compose/.env`:
+Set two of the tokens, and the suggester's API key. With `-` each is read without being shown, and stays out of the shell's history:
 
-```
-IMPORTER_FIREFLY_TOKEN=...
-SUGGESTER_FIREFLY_TOKEN=...
-ANTHROPIC_API_KEY=...
+```bash
+scripts/firefly-pocket config set IMPORTER_FIREFLY_TOKEN -     # paste it, then Enter
+scripts/firefly-pocket config set SUGGESTER_FIREFLY_TOKEN -
+scripts/firefly-pocket config set ANTHROPIC_API_KEY -
 ```
 
 (Firefly Pocket's token is not set here — you paste it into Firefly Pocket itself.)
@@ -130,7 +134,7 @@ Then open `https://app.<domain>` and paste that device's token when it asks. Add
 ## 6. Connect your bank
 
 1. In the Enable Banking control panel, create an application and download the **PEM private key**.
-2. Put it at `compose/secrets/eb/private.pem` (gitignored) and set `ENABLE_BANKING_APP_ID` in `.env`.
+2. Put it at `compose/secrets/eb/private.pem` (gitignored), then run `scripts/set-eb-key.sh compose/secrets/eb/private.pem <application-id>`. It checks the key, sets `ENABLE_BANKING_PRIVATE_KEY` and `ENABLE_BANKING_APP_ID`, and asks Enable Banking whether the application is sandbox or production.
 3. Register two **redirect URLs** in their portal, exactly so: `https://app.<domain>/eb-callback`, where links started from Firefly Pocket come back, and `https://import.<domain>/eb-callback`, for the importer's own UI (your `NEXT_HOSTNAME` and `IMPORT_HOSTNAME`, where you set those). Caddy sends a callback whose state starts with `fx-` to the importer fork on either host.
 4. `docker compose up -d importer`
 5. Open `https://import.<domain>` (basic auth) and **run one import interactively**: link the bank, map each bank account to a Firefly asset account, configure duplicate detection.
@@ -193,9 +197,9 @@ ssh fireflyx@<ip> 'bash -s' < scripts/install-deploy-agent.sh   # now compose/.e
 ssh fireflyx@<ip> 'crontab -l'                                   # a few minutes later
 ```
 
-Set `NTFY_URL` in `.env` first (and enable [push alerts in Firefly Pocket](#push-alerts-in-firefly-pocket) if you want them as native notifications). **This system's most likely failure mode is silent** — the bank consent expires, imports stop, and nothing looks broken. Alerting is what turns that into something you find out about.
+Set `NTFY_URL` first, `scripts/firefly-pocket config set NTFY_URL -` (and enable [push alerts in Firefly Pocket](#push-alerts-in-firefly-pocket) if you want them as native notifications). **This system's most likely failure mode is silent** — the bank consent expires, imports stop, and nothing looks broken. Alerting is what turns that into something you find out about.
 
-Then set the dead man's switch, `HEALTHCHECK_NIGHTLY_URL` and `HEALTHCHECK_BACKUP_URL` (see `.env.example`). Every other alert is sent *from* this machine, so if the machine is down or cron has stopped, there is only silence. One check per job at [healthchecks.io](https://healthchecks.io), with the schedule below and your timezone, alerts you when the ping does not arrive. Only "ok", "failed" and a one-line reason are sent, never transaction data. A backup that never left the machine pings as failed on purpose.
+Then set the dead man's switch, `HEALTHCHECK_NIGHTLY_URL` and `HEALTHCHECK_BACKUP_URL`, the same way (`.env.example` says what each is). Every other alert is sent *from* this machine, so if the machine is down or cron has stopped, there is only silence. One check per job at [healthchecks.io](https://healthchecks.io), with the schedule below and your timezone, alerts you when the ping does not arrive. Only "ok", "failed" and a one-line reason are sent, never transaction data. A backup that never left the machine pings as failed on purpose.
 
 | When | What |
 |---|---|
@@ -221,7 +225,7 @@ There are two kinds of message. **Alerts** (backup, restore test and consent fai
 
 Notifications go to the Firefly Pocket app only (the devices that want them); ntfy additionally gets import problems, so a broken Firefly Pocket cannot hide a broken import. The digest cron runs every day and Pocket decides who gets it. See `docs/design/push-alerts.md`.
 
-| `.env` variable | What |
+| Setting | What |
 |---|---|
 | `NEXT_NOTIFY_TOKEN` | Bearer token for Firefly Pocket's internal `/api/internal/notify`; generated, at least 32 characters. Scripts only push when it is set |
 | `VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY` | P-256 keypair identifying this server to the push services (base64url, public key uncompressed); generated with `openssl`. Without them Firefly Pocket answers 503 and alerts fall back to ntfy alone |
@@ -229,7 +233,7 @@ Notifications go to the Firefly Pocket app only (the devices that want them); nt
 
 **Enabling it** (an existing server; a fresh install already has all of it):
 
-1. On the server, in `/opt/fireflyx`: `./scripts/gen-secrets.sh`. It adds `NEXT_NOTIFY_TOKEN` and the VAPID keypair to the existing `.env` if they are missing; then set `VAPID_SUBJECT` to `mailto:` your address. (If the script says it could not generate the keypair, there is no `openssl`: run `npx web-push generate-vapid-keys` anywhere and paste both values in.) The compose file requires `NEXT_NOTIFY_TOKEN`, and a deploy without it stops at `docker compose` with `run scripts/gen-secrets.sh`, restarting nothing.
+1. On the server, in `/opt/fireflyx`: `./scripts/gen-secrets.sh`. It adds `NEXT_NOTIFY_TOKEN` and the VAPID keypair if they are missing; then set `VAPID_SUBJECT` to `mailto:` your address. (If the script says it could not generate the keypair, there is no `openssl`: run `npx web-push generate-vapid-keys` anywhere and paste both values in.) The compose file requires `NEXT_NOTIFY_TOKEN`, and a deploy without it stops at `docker compose` with `run scripts/gen-secrets.sh`, restarting nothing.
 2. Merging this repository deploys the senders and the Caddyfile that hides `/api/internal/*` (a deploy recreates Caddy when the Caddyfile changed). Check: `curl -s -o /dev/null -w '%{http_code}\n' https://<NEXT_HOSTNAME>/api/internal/notify` prints `404`. If you changed `.env` after Firefly Pocket started, `scripts/deploy.sh --force` on the server restarts it with the new env.
 3. On the phone: open Firefly Pocket, **Add to Home Screen**, open it from the Home Screen icon, and turn notifications on in its Settings. The permission prompt appears only after you tap that switch.
 
@@ -294,12 +298,12 @@ If the export uses `classic` duplicate detection, the command refuses it as diff
 When a consent finishes at the bank but Firefly Pocket does not get the account back (`reason=no_accounts`, `bank_declined`, `session_failed`), turn the consent trace on for the importer, repeat the link once, and read what Enable Banking and the bank actually said:
 
 ```bash
-ssh <server> "cd /opt/fireflyx/compose && sed -i 's/^FIREFLYX_EB_TRACE=.*/FIREFLYX_EB_TRACE=true/' .env && docker compose up -d importer"
+ssh <server> "cd /opt/fireflyx && scripts/firefly-pocket config set FIREFLYX_EB_TRACE true && docker compose --project-directory compose up -d importer"
 # link the bank in Firefly Pocket, then:
 ssh <server> "cd /opt/fireflyx/compose && docker compose logs --since 30m importer | grep -E 'EB-TRACE|FireflyX:'"
 ```
 
-Each step is one line: `POST /auth request` (bank, `psu_type`, redirect URL), `POST /auth response`, `callback reached` (the query the bank sent back, `error` and `error_description` included), `POST /sessions response` (session status, how many accounts, every field each account carries), and, when no account came back, `GET /sessions/{id} (second look)` and `GET /accounts/{uid}/details` for whatever uids the session lists. IBANs and names are masked. `FIREFLYX_EB_TRACE_RAW=true` adds Enable Banking's answers unmasked; switch it (and the trace) off again afterwards.
+Each step is one line: `POST /auth request` (bank, `psu_type`, redirect URL), `POST /auth response`, `callback reached` (the query the bank sent back, `error` and `error_description` included), `POST /sessions response` (session status, how many accounts, every field each account carries), and, when no account came back, `GET /sessions/{id} (second look)` and `GET /accounts/{uid}/details` for whatever uids the session lists. IBANs and names are masked. `FIREFLYX_EB_TRACE_RAW=true` adds Enable Banking's answers unmasked; switch it (and the trace) off again afterwards, with `config unset` and `up -d importer`.
 
 What the lines tell you:
 
@@ -404,7 +408,7 @@ your change ─► PR ─► CI ─► you merge ──────────�
                                        server, every 2 minutes: git fetch ─► scripts/deploy.sh
 ```
 
-Every PR into `master` runs CI (`.github/workflows/ci.yml`), seven checks: `shellcheck` on every script, `compose` (`docker compose config` with a `.env` made the way a new server makes one, by `scripts/gen-secrets.sh`), `suggester` (its tests, inside the image the server runs, built for `linux/amd64` and, under QEMU, `linux/arm64`), and `boot` (`scripts/boot-test.sh`: the whole stack from scratch with throwaway values, a first user and token, then the deploy's own smoke test; on a pin PR that is the new image booting before it reaches the server), `bundle` (the release bundle below, assembled but not pushed, then compared with the checkout by `scripts/agent.sh compare`), and `upgrade (stable)` and `upgrade (latest)` (`scripts/upgrade-test.sh`: that published bundle booted with its own boot test, then upgraded to the PR the way a deploy does it, with the old `.env` and `gen-secrets.sh` for anything new, smoke-tested, and the token made on the old version checked against Firefly III; from `latest`, that is the very upgrade the merge causes on your server). Before the first release, `upgrade (stable)` passes with a note that there is nothing to upgrade from. Merge only when all seven are green. Pins are PRs too: *Pin fork image* opens one per service as the pin app (the *pin PR* above), and it merges itself once the checks pass. `master` takes no direct pushes at all ([GitHub settings](#github-settings-once)).
+Every PR into `master` runs CI (`.github/workflows/ci.yml`), seven checks: `shellcheck` on every script, `compose` (the settings store's tests, `scripts/config-test.sh`, then `docker compose config` with a hand-edited `.env` made by `scripts/gen-secrets.sh`, as a server from before the store has one), `suggester` (its tests, inside the image the server runs, built for `linux/amd64` and, under QEMU, `linux/arm64`), and `boot` (`scripts/boot-test.sh`: the whole stack from scratch with throwaway values, set up through the settings store as a new server is, a first user and token, then the deploy's own smoke test; on a pin PR that is the new image booting before it reaches the server), `bundle` (the release bundle below, assembled but not pushed, then compared with the checkout by `scripts/agent.sh compare`), and `upgrade (stable)` and `upgrade (latest)` (`scripts/upgrade-test.sh`: that published bundle booted with its own boot test, then upgraded to the PR the way a deploy does it, with the old `.env` (and settings store, once it has one) and `gen-secrets.sh` for anything new, smoke-tested, and the token made on the old version checked against Firefly III; a hand-edited `.env` is then moved into the store with `config import`, and `up -d` must recreate nothing; from `latest`, that is the very upgrade the merge causes on your server). Before the first release, `upgrade (stable)` passes with a note that there is nothing to upgrade from. Merge only when all seven are green. Pins are PRs too: *Pin fork image* opens one per service as the pin app (the *pin PR* above), and it merges itself once the checks pass. `master` takes no direct pushes at all ([GitHub settings](#github-settings-once)).
 
 **The release bundle.** Every merge into `master` also publishes `ghcr.io/majster01/firefly-pocket-stack` (`.github/workflows/publish.yml`, built by `scripts/make-bundle.sh`): the files a server runs, at their paths in this repository, with every image in compose pinned to the digest its tag named at that moment, and a `release.json` that lists the version, the commit and each component with its digest and whether it migrates a database. It is tagged `sha-<commit>` for every merge and `latest` for the newest. `master` builds are numbered after the next minor release, `1.0.0-dev.<n>` until the first one. Your server still deploys from git; the server agent will move it onto the bundle, and until then checks each bundle against the deploy in shadow mode (below).
 
@@ -439,21 +443,21 @@ The deploy and the cron jobs share one lock, `/run/lock/fireflyx.lock`: a deploy
 | Firefly III, Postgres, Caddy, Dozzle, the socket proxy, the images the scripts use | Renovate opens a PR on Monday mornings; merge it | that service; Firefly III and Postgres after a backup and restore test |
 | The category suggester (`services/category-suggester`) | merge into `master`; *Suggester image* builds and tests the image, then "Pin fork image" opens its pin PR | `suggester-trigger`; the nightly run uses it the same night |
 | Anything else in this repository: compose, Caddyfile, scripts, `crontab`, `config/importer-base.json` | merge into `master` | whatever compose sees changed |
-| `compose/.env` (only on the server) | edit it there, then `scripts/deploy.sh --force` | the services whose environment changed |
+| A setting (only on the server) | `scripts/firefly-pocket config set <KEY> <value>` there, then `scripts/deploy.sh --force` | the services whose environment changed |
 
 Rules:
 
 - **Never edit tracked files on the server.** The deploy refuses to run over them and alerts. Put the change into `master`.
-- **A new secret or `.env` value goes onto the server before the merge** (`./scripts/gen-secrets.sh`, or by hand). Without it the deploy stops at `docker compose` with the `:?` message, and nothing restarts.
+- **A new secret or setting goes onto the server before the merge** (`./scripts/gen-secrets.sh`, or `config set`). Without it the deploy stops at `docker compose` with the `:?` message, and nothing restarts.
 - **Features across repositories**: merge the side the others call first, usually this repository, then the importer, then Firefly Pocket. Each tolerates the others being older.
 - **Roll back a fork or the suggester**: Actions → *Pin fork image* → *Run workflow* with the service and an earlier tag (the `Bump …` commits in `master` list them). It opens a pin PR that merges itself, like any other. Anything else: *Revert* on the merged PR in GitHub, which opens a PR that undoes it. Rolling back an image that has migrated a database also needs that database restored ([Restoring](#restoring)).
 - **What runs now**: `cat /opt/fireflyx/.deployed-rev`; the log is `journalctl -u fireflyx-deploy`, and what shadow mode found is in `/opt/fireflyx/.shadow.log`.
 
-With `DEPLOY_STATUS_TOKEN` in `.env` (a fine-grained token for this repository only, *Commit statuses: Read and write*), every commit in GitHub shows a `deploy/server` status: pending, success or failure. A release needs it: that status is the canary gate's evidence ([Releasing](#releasing)). Without it, or with a token for another repository, the deploy only logs `WARN: could not set the GitHub commit status`.
+With `DEPLOY_STATUS_TOKEN` set (`config set DEPLOY_STATUS_TOKEN -`; a fine-grained token for this repository only, *Commit statuses: Read and write*), every commit in GitHub shows a `deploy/server` status: pending, success or failure. A release needs it: that status is the canary gate's evidence ([Releasing](#releasing)). Without it, or with a token for another repository, the deploy only logs `WARN: could not set the GitHub commit status`.
 
 **Shadow mode.** The server agent will deploy from the release bundle instead of the checkout. Its first step only watches: on a tick with nothing to deploy, `scripts/deploy.sh` runs `scripts/agent.sh shadow`, which, once for each revision the server deployed, fetches the bundle `latest` names and compares it with the checkout. It fetches anonymously from GHCR's registry API and checks each piece against its digest. The bundle must hold the same files as the checkout, with the same contents and executable bits; in compose only the image lines may differ, and each must pin the very image the server pulled for that tag. It deploys nothing, and it cannot fail a deploy: a problem is a `WARN` in the log, and the next tick tries again. While `latest` is another revision's bundle (the deploy or *Publish bundle* is still running), it waits. Each result is a line in `/opt/fireflyx/.shadow.log` and, with `DEPLOY_STATUS_TOKEN`, an `agent/shadow` status on the commit beside `deploy/server`. A difference also goes to ntfy. To look at a bundle yourself: `scripts/agent.sh fetch latest <empty-dir>`, then `scripts/agent.sh compare <dir>`.
 
-Optional: `NEXT_WARMUP_FIREFLY_TOKEN` in `.env` (a separate Firefly token of your user) turns on Firefly Pocket's cache warm-up; then `scripts/deploy.sh --force`. Firefly III's webhooks stay off, so Firefly Pocket's cache learns about changes made outside it only from its own changes and its TTL.
+Optional: `NEXT_WARMUP_FIREFLY_TOKEN` (a separate Firefly token of your user, set with `config set`) turns on Firefly Pocket's cache warm-up; then `scripts/deploy.sh --force`. Firefly III's webhooks stay off, so Firefly Pocket's cache learns about changes made outside it only from its own changes and its TTL.
 
 #### Setting it up on an existing server (once)
 
@@ -534,9 +538,36 @@ Attachments restore from the matching `uploads-<stamp>.tar.gz` into the `firefly
 
 Firefly Pocket's database restores the same way with only `next` stopped: `firefly_next`, owned by `next`, from `firefly_next-<stamp>.dump`.
 
+### Settings
+
+Every setting `compose/.env.example` lists lives in a small store on the server: the plain ones in `compose/config.json`, each secret in its own file under `compose/secrets/env/` (mode 600). `scripts/settings.json` says how each is checked and what its default is. `compose/.env` is written from the store and from nothing else:
+
+```bash
+scripts/firefly-pocket config list                  # every setting; a secret shows only its last 4 characters
+scripts/firefly-pocket config set <KEY> <value>     # checked, kept, and .env written again
+scripts/firefly-pocket config set <KEY> -           # the value read without being shown
+scripts/firefly-pocket config unset <KEY>           # back to its default
+scripts/deploy.sh --force                           # apply it now; otherwise at the next deploy
+```
+
+Every deploy writes `.env` again, for the `settings.json` of the revision it deploys. **Do not edit `.env` by hand**: the deploy notices, stops before restarting anything and alerts, naming the settings that differ (never their values). Put the edit in with `config set --force <KEY> <value>`, or drop it with `config render --force`. The nightly backup keeps the store beside its copy of `.env`.
+
+#### Moving an existing server to the store (once)
+
+A server set up before the store has a hand-edited `.env` and no `compose/config.json`. Until it moves, nothing changes for it: the deploy writes no `.env`, and `config set` refuses. To move it:
+
+```bash
+ssh fireflyx@<ip>
+cd /opt/fireflyx
+scripts/firefly-pocket config import
+scripts/firefly-pocket config list
+```
+
+`import` checks every value first and, if one fails its check, changes nothing and says which. Otherwise every line of `.env` goes into the store, lines no setting reads anymore included, and `.env` is written again with each value exactly as it was. It adds only settings the old `.env` never had, each with the value compose already used for it, and lists them. The old file stays as `compose/.env.before-import`. Nothing restarts, and the next deploy finds nothing to change. To go back: `rm compose/config.json compose/.env.rendered; rm -r compose/secrets/env`, and `.env` is a hand-edited one again, with every value.
+
 ### Rotating a secret
 
-Blank the line in `compose/.env`, re-run `./scripts/gen-secrets.sh`, then `docker compose up -d`. Note that **database passwords are not rotated this way** — the `initdb` script only runs on a first-ever start, so changing `FIREFLY_DB_PASSWORD` also requires `ALTER ROLE firefly WITH PASSWORD '...'` by hand.
+`scripts/firefly-pocket config unset <KEY>`, re-run `./scripts/gen-secrets.sh`, then `docker compose up -d`. Note that **database passwords are not rotated this way** — the `initdb` script only runs on a first-ever start, so changing `FIREFLY_DB_PASSWORD` also requires `ALTER ROLE firefly WITH PASSWORD '...'` by hand.
 
 Rotating `NEXT_NOTIFY_TOKEN` also needs `docker compose up -d next`; the host scripts re-read `.env` on each run.
 

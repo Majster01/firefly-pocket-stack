@@ -12,13 +12,14 @@
 # exists: it makes its own, and its containers, volumes and networks use the
 # server's names.
 #
-#   1. compose/.env from .env.example and gen-secrets.sh, with DOMAIN=localhost
-#      and no hostname of its own, so every host is derived (*.localhost,
-#      which Caddy serves from its own CA, no Let's Encrypt)
+#   1. the settings as a new server makes them (README "Configure"): DOMAIN=localhost,
+#      the two emails and nothing else set by hand, every secret from gen-secrets.sh,
+#      and compose/.env written from that store. No hostname of its own, so every
+#      host is derived (*.localhost, which Caddy serves from its own CA)
 #   2. Postgres and Firefly III, until Firefly III answers
 #   3. the first user and a Personal Access Token, as stage 2 needs, without
 #      the web UI; the token goes into IMPORTER_FIREFLY_TOKEN and
-#      SUGGESTER_FIREFLY_TOKEN
+#      SUGGESTER_FIREFLY_TOKEN, with config set
 #   4. everything, as the deploy starts it: up -d --no-build --remove-orphans
 #   5. the deploy's smoke test, and the token against Firefly III's API and
 #      through Firefly Pocket's, which calls Firefly III on the internal network
@@ -30,10 +31,11 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ENV_FILE="$REPO_ROOT/compose/.env"
+STORE=(compose/config.json compose/secrets/env compose/.env.rendered)
 cd "$REPO_ROOT"
 
-if [ -f "$ENV_FILE" ]; then
-  echo "FATAL: $ENV_FILE exists. This boots a throwaway stack under the server's names;" >&2
+if [ -f "$ENV_FILE" ] || [ -e compose/config.json ] || [ -e compose/secrets/env ]; then
+  echo "FATAL: $ENV_FILE or the settings store exists. This boots a throwaway stack under the server's names;" >&2
   echo "       run it in a fresh checkout, never on the server." >&2
   exit 1
 fi
@@ -56,27 +58,25 @@ finish() {
     done
   fi
   if [ "${KEEP:-}" = 1 ]; then
-    echo "==> KEEP=1: still running. Remove it with: docker compose --project-directory compose down -v; rm compose/.env"
+    echo "==> KEEP=1: still running. Remove it with: docker compose --project-directory compose down -v; rm -r compose/.env ${STORE[*]}"
   else
     compose down -v --remove-orphans >/dev/null 2>&1 || true
-    rm -f "$ENV_FILE"
+    rm -rf "$ENV_FILE" "${STORE[@]}"
   fi
   exit "$status"
 }
 trap finish EXIT
 
-# set_env KEY VALUE: replace KEY's line in compose/.env.
-set_env() {
-  KEY="$1" VALUE="$2" perl -pi -e 's/^\Q$ENV{KEY}\E=.*/$ENV{KEY}=$ENV{VALUE}/' "$ENV_FILE"
-  grep -q "^$1=" "$ENV_FILE" || { echo "FATAL: no $1 line in compose/.env" >&2; return 1; }
-}
+# setting KEY VALUE: as a person sets one, the value through stdin.
+setting() { scripts/firefly-pocket config set "$1" - <<<"$2" >/dev/null; }
 
-echo "==> compose/.env with throwaway values"
-cp compose/.env.example "$ENV_FILE"
+echo "==> the settings, as a new server makes them, with throwaway values"
+setting DOMAIN localhost
+setting ACME_EMAIL ci@example.com
+setting SITE_OWNER ci@example.com
 scripts/gen-secrets.sh >/dev/null
-set_env DOMAIN localhost
 if grep -E '^[A-Z_]+_HOSTNAME=' "$ENV_FILE"; then
-  echo "FATAL: a fresh compose/.env should need only DOMAIN, but sets the hostnames above" >&2
+  echo "FATAL: a new server should need only DOMAIN, but compose/.env sets the hostnames above" >&2
   exit 1
 fi
 
@@ -119,8 +119,8 @@ if ! [[ "$token" =~ ^[A-Za-z0-9._-]{100,}$ ]]; then
   echo "no token from Firefly III; its last line was: ${token:0:200}"
   exit 1
 fi
-set_env IMPORTER_FIREFLY_TOKEN "$token"
-set_env SUGGESTER_FIREFLY_TOKEN "$token"
+setting IMPORTER_FIREFLY_TOKEN "$token"
+setting SUGGESTER_FIREFLY_TOKEN "$token"
 
 echo "==> everything, as the deploy starts it"
 compose up -d --no-build --remove-orphans

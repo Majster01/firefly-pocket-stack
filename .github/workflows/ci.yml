@@ -33,7 +33,7 @@ jobs:
         env:
           SHELLCHECK_IMAGE: koalaman/shellcheck:v0.11.0
         run: |
-          git ls-files -z '*.sh' \
+          git ls-files -z '*.sh' scripts/firefly-pocket \
             | xargs -0 docker run --rm -v "$PWD:/mnt:ro" -w /mnt "$SHELLCHECK_IMAGE" -x -P scripts
 
   compose:
@@ -42,9 +42,15 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      # The way a new server makes its .env (README setup), so this also runs
-      # gen-secrets.sh. Every value is a throwaway made for this run, including
-      # the importer password it prints.
+      # scripts/config.sh: settings.json against .env.example and compose, and
+      # each command, on a copy in a temporary directory.
+      - name: The settings store
+        run: scripts/config-test.sh
+
+      # A hand-edited .env, as a server set up before the settings store has
+      # one, so this also runs gen-secrets.sh the old way (the boot job makes a
+      # new server's, through the store). Every value is a throwaway made for
+      # this run, including the importer password it prints.
       - name: Make a compose/.env from .env.example
         run: |
           cp compose/.env.example compose/.env

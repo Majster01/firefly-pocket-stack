@@ -1,6 +1,12 @@
 # Secrets — never commit these.
 compose/.env
 compose/secrets/**
+# The settings store (scripts/config.sh) and what it leaves beside .env.
+compose/config.json
+compose/config.json.*
+compose/.env.*
+!compose/.env.example
+compose/.import.*
 !compose/secrets/.gitkeep
 !compose/secrets/eb/.gitkeep
 

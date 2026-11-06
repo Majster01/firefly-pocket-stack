@@ -15,11 +15,15 @@
 #      (stable before the first release) passes, saying so
 #   2. boot it with its own scripts/boot-test.sh, and leave it running: a
 #      first user, a token, the old images and their data
-#   3. carry its compose/.env over to this checkout, and let gen-secrets.sh
-#      fill in any secret this version adds (README: re-run it on upgrades)
+#   3. carry its compose/.env over to this checkout, and its settings store
+#      when it has one, and let gen-secrets.sh fill in any secret this version
+#      adds (README: re-run it on upgrades)
 #   4. up -d --no-build --remove-orphans from this checkout, as the deploy does
 #   5. the deploy's smoke test, and the token made on the old version against
 #      Firefly III's API and through Firefly Pocket's: the data came through
+#   6. a server whose .env is still edited by hand: config import, as yours
+#      runs it once, and up -d again, which must recreate nothing: every value
+#      is still the same
 #
 # Needs Docker. Never for the server: like boot-test.sh, it uses the server's
 # names, and refuses where a compose/.env exists.
@@ -30,9 +34,10 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 IMAGE="${IMAGE:-ghcr.io/majster01/firefly-pocket-stack}"
 from="${FROM:-stable}"
 ENV_FILE="$REPO_ROOT/compose/.env"
+STORE=(compose/config.json compose/secrets/env compose/.env.rendered)
 cd "$REPO_ROOT"
 
-if [ -f "$ENV_FILE" ]; then
+if [ -f "$ENV_FILE" ] || [ -e compose/config.json ] || [ -e compose/secrets/env ]; then
   echo "FATAL: $ENV_FILE exists; run this in a fresh checkout, never on the server." >&2
   exit 1
 fi
@@ -66,7 +71,7 @@ finish() {
   elif [ -f "$old/compose/.env" ]; then
     docker compose --project-directory "$old/compose" down -v --remove-orphans >/dev/null 2>&1 || true
   fi
-  rm -f "$ENV_FILE"
+  rm -rf "$ENV_FILE" "${STORE[@]}" compose/.env.before-import
   rm -rf "$old"
   exit "$status"
 }
@@ -81,7 +86,15 @@ KEEP=1 "$old/scripts/boot-test.sh"
 
 echo "==> upgrade to this checkout"
 cp "$old/compose/.env" "$ENV_FILE"
+carried=""
+if [ -f "$old/compose/config.json" ]; then
+  cp -a "$old/compose/config.json" "$old/compose/.env.rendered" compose/
+  cp -a "$old/compose/secrets/env" compose/secrets/
+  carried=1
+fi
 scripts/gen-secrets.sh | sed -n '/Filled:/,/^$/p'
+# As the deploy starts: .env written from the store, for this version's settings.
+[ -z "$carried" ] || scripts/firefly-pocket config render
 # shellcheck source=lib.sh
 source "$REPO_ROOT/scripts/lib.sh"
 compose up -d --no-build --remove-orphans
@@ -91,5 +104,17 @@ smoke_test
 
 echo "==> the token made on $from, against Firefly III's API and through Firefly Pocket's"
 token_check "$IMPORTER_FIREFLY_TOKEN"
+
+if [ -z "$carried" ]; then
+  echo "==> its hand-edited .env into the settings store, as your server does it once"
+  scripts/firefly-pocket config import
+  went="$(compose up -d --no-build --remove-orphans 2>&1)"
+  if grep -E 'Recreate|Creat' <<<"$went"; then
+    echo "the import changed what a service runs with: it recreated the services above"
+    exit 1
+  fi
+  smoke_test
+  echo "every service runs on as it was"
+fi
 
 echo "==> upgraded from $from and checked"
