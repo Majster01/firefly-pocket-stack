@@ -98,6 +98,11 @@ jobs:
           scripts/make-bundle.sh "$RUNNER_TEMP/bundle"
           cat "$RUNNER_TEMP/bundle/release.json"
 
+      # What the server agent's shadow mode checks on the server, files only:
+      # the bundle holds this checkout's files, and only the image lines differ.
+      - name: Compare it with the checkout
+        run: scripts/agent.sh compare "$RUNNER_TEMP/bundle"
+
   # A published bundle booted, then upgraded to this commit the way a deploy
   # does it, and checked again (Release pipeline step 8): from stable, what new
   # installs run, and from latest, what your server runs, so the very upgrade
@@ -118,3 +123,77 @@ jobs:
         env:
           FROM: ${{ matrix.from }}
         run: scripts/upgrade-test.sh
+
+  # WIP: shadow mode end to end against the published latest. Removed before merge.
+  shadow-wip:
+    name: shadow-wip (${{ matrix.store }})
+    strategy:
+      fail-fast: false
+      matrix:
+        store: [classic, containerd]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - name: containerd image store
+        if: matrix.store == 'containerd'
+        run: |
+          echo '{"features":{"containerd-snapshotter":true}}' | sudo tee /etc/docker/daemon.json
+          sudo systemctl restart docker
+      - name: shadow against latest
+        run: |
+          set -euxo pipefail
+          docker info -f '{{.ServerVersion}} {{.Driver}} {{json .DriverStatus}}'
+          W="$RUNNER_TEMP/server"
+          scripts/agent.sh fetch latest "$RUNNER_TEMP/peek"
+          commit="$(jq -r .commit "$RUNNER_TEMP/peek/release.json")"
+          scripts/agent.sh fetch "$(scripts/agent.sh resolve "sha-${commit::7}")" "$RUNNER_TEMP/peek2"
+          diff -r "$RUNNER_TEMP/peek" "$RUNNER_TEMP/peek2"
+          find "$RUNNER_TEMP/peek" -maxdepth 2 | sort | head -40
+          git worktree add -q "$W" "$commit"
+          cp scripts/agent.sh scripts/lib.sh "$W/scripts/"
+          cp "$W/compose/.env.example" "$W/compose/.env"
+          sed -i 's/^IMPORT_AUTH_HASH=$/IMPORT_AUTH_HASH=placeholder/' "$W/compose/.env"
+          "$W/scripts/gen-secrets.sh" >/dev/null
+          docker compose --project-directory "$W/compose" --profile jobs pull --quiet
+          echo "$commit" > "$W/.deployed-rev"
+
+          echo "### 1: the one difference is this branch's lib.sh"
+          "$W/scripts/agent.sh" shadow | tee "$RUNNER_TEMP/1.out"
+          grep -q 'differs from the checkout in 1:' "$RUNNER_TEMP/1.out"
+          grep -q 'differs: scripts/lib.sh' "$RUNNER_TEMP/1.out"
+          test "$(cat "$W/.shadow-rev")" = "$commit"
+
+          echo "### 2: compared already, so silent"
+          test -z "$("$W/scripts/agent.sh" shadow)"
+
+          echo "### 3: an image missing, and a tag that moved"
+          rm "$W/.shadow-rev"
+          docker image rm amir20/dozzle:v11.4.0
+          docker pull -q caddy:2.11.6-alpine
+          docker tag caddy:2.11.6-alpine caddy:2.11.7-alpine
+          "$W/scripts/agent.sh" shadow | tee "$RUNNER_TEMP/3.out"
+          grep -q 'not on the server: amir20/dozzle:v11.4.0' "$RUNNER_TEMP/3.out"
+          grep -q 'another image: the server pulled caddy:2.11.7-alpine' "$RUNNER_TEMP/3.out"
+          docker compose --project-directory "$W/compose" pull --quiet caddy dozzle
+
+          echo "### 4: the server runs another revision: wait, and say so once"
+          git rev-parse "$commit~1" > "$W/.deployed-rev"
+          "$W/scripts/agent.sh" shadow | tee "$RUNNER_TEMP/4.out"
+          grep -q 'looking again' "$RUNNER_TEMP/4.out"
+          test -z "$("$W/scripts/agent.sh" shadow)"
+          cat "$W/.shadow-wait"
+
+          echo "### 5: deploy.sh's idle tick runs it"
+          cp scripts/deploy.sh "$W/scripts/"
+          echo "$commit" > "$W/.deployed-rev"
+          rm -f "$W/.shadow-rev" "$W/.shadow-wait"
+          (cd "$W" && git fetch -q origin master && test "$(git rev-parse FETCH_HEAD)" = "$commit")
+          "$W/scripts/deploy.sh" 2>&1 | tee "$RUNNER_TEMP/5.out"
+          grep -q 'differs from the checkout in 2:' "$RUNNER_TEMP/5.out"
+          grep -q 'differs: scripts/deploy.sh' "$RUNNER_TEMP/5.out"
+
+          echo "### .shadow.log"
+          cat "$W/.shadow.log"

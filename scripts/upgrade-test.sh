@@ -10,8 +10,9 @@
 #     FROM=latest scripts/upgrade-test.sh
 #     FROM=1.0.0  scripts/upgrade-test.sh
 #
-#   1. extract ghcr.io/majster01/firefly-pocket-stack:<FROM>; a tag that does
-#      not exist yet (stable before the first release) passes, saying so
+#   1. extract ghcr.io/majster01/firefly-pocket-stack:<FROM> the way the server
+#      agent does (scripts/agent.sh fetch); a tag that does not exist yet
+#      (stable before the first release) passes, saying so
 #   2. boot it with its own scripts/boot-test.sh, and leave it running: a
 #      first user, a token, the old images and their data
 #   3. carry its compose/.env over to this checkout, and let gen-secrets.sh
@@ -72,10 +73,8 @@ finish() {
 trap finish EXIT
 
 echo "==> $IMAGE:$from"
-cid="$(docker create "$IMAGE:$from" none)"
-docker cp -q "$cid:/." "$old/"
-docker rm -f "$cid" >/dev/null
-echo "    $(jq -r '"\(.version), built from \(.commit[0:7])"' "$old/release.json")"
+# As the server agent fetches it: each piece checked against its digest.
+IMAGE="$IMAGE" "$REPO_ROOT/scripts/agent.sh" fetch "$from" "$old"
 
 echo "==> boot it, as a server running $from would be"
 KEEP=1 "$old/scripts/boot-test.sh"

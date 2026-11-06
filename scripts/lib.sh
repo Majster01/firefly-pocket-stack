@@ -18,6 +18,13 @@ DOCKER_NETWORK="fireflyx"
 # shellcheck disable=SC2034  # used by deploy.sh
 MIGRATING="app db importer"
 
+# What the release bundle holds: everything a server reads, and nothing it
+# does not, so no CI, Terraform, docs or the suggester's source (its image is
+# in the bundle by digest). scripts/make-bundle.sh reads this line to build the
+# bundle, and the server agent's shadow mode to compare one with the checkout.
+# shellcheck disable=SC2034  # read by make-bundle.sh and agent.sh, not sourced
+BUNDLE_PATHS="LICENSE crontab scripts config compose/docker-compose.yml compose/Caddyfile compose/.env.example compose/initdb compose/legal compose/secrets compose/importer"
+
 if [ ! -f "$ENV_FILE" ]; then
   echo "FATAL: $ENV_FILE not found. Run scripts/gen-secrets.sh first." >&2
   exit 1
@@ -69,6 +76,25 @@ json_string() {
   s="${s//$'\r'/\\r}"
   s="${s//$'\t'/\\t}"
   printf '"%s"' "$s"
+}
+
+# commit_status <context> <rev> <state> <description>
+#
+# Optional: what the server did with a revision, as a commit status on GitHub,
+# so the commit list shows it: deploy/server (deploy.sh) and agent/shadow
+# (agent.sh). DEPLOY_STATUS_TOKEN in .env is a fine-grained token for this
+# repository only, "Commit statuses: write". The token goes to curl on stdin,
+# so it does not show in `ps`.
+commit_status() {
+  [ -n "${DEPLOY_STATUS_TOKEN:-}" ] || return 0
+  local slug
+  slug="$(git -C "$REPO_ROOT" remote get-url origin | sed -E 's#^(git@github\.com:|https://github\.com/)##; s#\.git$##')"
+  printf 'header = "Authorization: Bearer %s"\n' "$DEPLOY_STATUS_TOKEN" \
+    | curl -fsS --max-time 15 -o /dev/null --config - \
+        -H 'Accept: application/vnd.github+json' \
+        --data "{\"state\":\"$3\",\"context\":$(json_string "$1" 100),\"description\":$(json_string "$4" 140)}" \
+        "https://api.github.com/repos/$slug/statuses/$2" \
+    || echo "WARN: could not set the GitHub commit status $1" >&2
 }
 
 # notify_push <title> <message> [event] [path] [count]
