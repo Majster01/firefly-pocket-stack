@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+#
+# The server's command line.
+#
+#     scripts/firefly-pocket config ...   the settings (scripts/config.sh says how)
+
+set -euo pipefail
+
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+case "${1:-}" in
+  config) shift; exec "$here/config.sh" "$@" ;;
+  *)
+    echo "usage: scripts/firefly-pocket config <list|get|set|unset|has|render|import> ..." >&2
+    exit 2
+    ;;
+esac

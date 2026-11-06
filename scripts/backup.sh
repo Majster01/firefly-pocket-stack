@@ -98,6 +98,12 @@ fi
 # holds the hand-exported configs from before the importer fork took over; it
 # is kept until no longer needed (gitignored, so it exists only here).
 cp "$ENV_FILE" "$BACKUP_DIR/env-${STAMP}.bak"
+# The settings store (scripts/config.sh), where a server has one: .env is
+# written from it, and holds every value too.
+if [ -f "$COMPOSE_DIR/config.json" ]; then
+  (umask 077 && tar czf "$BACKUP_DIR/settings-${STAMP}.tar.gz" -C "$COMPOSE_DIR" config.json secrets/env) \
+    || fail "settings archive failed"
+fi
 if ls "$REPO_ROOT"/config/importers/*.json >/dev/null 2>&1; then
   tar czf "$BACKUP_DIR/importers-${STAMP}.tar.gz" -C "$REPO_ROOT" \
     --exclude='config/importers/.backup' config/importers \

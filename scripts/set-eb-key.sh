@@ -5,8 +5,9 @@
 #   ./scripts/set-eb-key.sh <path-to-private.pem> [application-id]
 #
 # Converts the PEM to the single-line base64 form the Data Importer actually
-# accepts, writes it into compose/.env, then asks the Enable Banking API what
-# the application is — most importantly whether it is SANDBOX or PRODUCTION.
+# accepts, keeps it (in the settings store, scripts/config.sh, or in a
+# hand-edited compose/.env), then asks the Enable Banking API what the
+# application is — most importantly whether it is SANDBOX or PRODUCTION.
 #
 # Why base64 rather than a path: the importer runs the value through
 # filter_var(FILTER_VALIDATE_URL) and rejects anything URL-shaped, logging
@@ -60,10 +61,17 @@ if ! diff -q \
 fi
 echo "==> key validated (round-trip is lossless, ${#B64} base64 chars)"
 
-# --- write into .env ----------------------------------------------------
+# --- keep it --------------------------------------------------------------
 APP_ID="$APP_ID_ARG"
 [ -z "$APP_ID" ] && APP_ID="$(grep '^ENABLE_BANKING_APP_ID=' "$ENV_FILE" | cut -d= -f2-)"
 
+if [ -f "$REPO_ROOT/compose/config.json" ]; then
+  FP="$REPO_ROOT/scripts/firefly-pocket"
+  "$FP" config set --no-render ENABLE_BANKING_PRIVATE_KEY - <<<"$B64" >/dev/null
+  [ -z "$APP_ID_ARG" ] || "$FP" config set --no-render ENABLE_BANKING_APP_ID "$APP_ID_ARG" >/dev/null
+  "$FP" config render
+  echo "==> settings updated"
+else
 python3 - "$B64" "$APP_ID" "$ENV_FILE" <<'PY'
 import sys, pathlib
 b64, app_id, env_path = sys.argv[1], sys.argv[2], sys.argv[3]
@@ -80,6 +88,7 @@ p.write_text("\n".join(out) + "\n")
 PY
 chmod 600 "$ENV_FILE"
 echo "==> compose/.env updated"
+fi
 
 # --- ask Enable Banking what this application actually is ----------------
 if [ -z "$APP_ID" ]; then
@@ -117,7 +126,7 @@ if [ "$HTTP_CODE" != "200" ]; then
 EOF
   fi
   echo
-  echo "The private key WAS written to compose/.env, but the application ID"
+  echo "The private key WAS kept, but the application ID"
   echo "is unverified — fix the ID before deploying."
   exit 1
 fi

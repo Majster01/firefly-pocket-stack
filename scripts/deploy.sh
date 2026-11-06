@@ -6,14 +6,17 @@
 # backup, the nightly import, a restore test or another deploy.
 #
 #     scripts/deploy.sh            # deploy origin/master if it moved since the last deploy
-#     scripts/deploy.sh --force    # deploy now: after a failure, or to apply an edited .env
+#     scripts/deploy.sh --force    # deploy now: after a failure, or to apply a changed setting
 #
 # Merging into master IS deploying. Tracked files are reset to master, so an
 # edit made by hand on the server stops the deploy and alerts instead of being
 # lost. compose/.env, compose/secrets/ and config/importers/ are not tracked and
-# are never touched.
+# are never touched, except that a server with the settings store
+# (scripts/config.sh) gets its .env written from it.
 #
 # The steps, stopping and alerting at the first failure:
+#   0. with the settings store: write compose/.env from it, as this revision's
+#      scripts/settings.json says. A hand edit to .env stops the deploy here
 #   1. pull every image. If one is missing, nothing has restarted yet. Nothing
 #      is built here: every image comes from a registry, the suggester's too
 #   2. if the image of Firefly III, Postgres or the importer is about to change:
@@ -144,6 +147,12 @@ caddyfile_changed() {
 echo "==> deploy $(git log --oneline -1) (last deployed: ${old:0:7})"
 github_status "$new" pending "deploying"
 
+if [ -f "$COMPOSE_DIR/config.json" ]; then
+  step "write compose/.env from the settings" "$REPO_ROOT/scripts/firefly-pocket" config render
+  # What was loaded at the start came from the .env before this one.
+  # shellcheck source=lib.sh
+  source "$REPO_ROOT/scripts/lib.sh"
+fi
 step "pull images" pull_images
 if needs_backup; then
   step "backup" "$REPO_ROOT/scripts/backup.sh"
