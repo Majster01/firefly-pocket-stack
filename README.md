@@ -132,7 +132,7 @@ Then open `https://next.<domain>` and paste that device's token when it asks. Ad
 
 1. In the Enable Banking control panel, create an application and download the **PEM private key**.
 2. Put it at `compose/secrets/eb/private.pem` (gitignored) and set `ENABLE_BANKING_APP_ID` in `.env`.
-3. Set the **redirect URL** in their portal to the importer's callback. Read the exact path off the importer UI when you select Enable Banking — the docs are thin here, and it must be HTTPS.
+3. Register two **redirect URLs** in their portal, exactly so: `https://<NEXT_HOSTNAME>/eb-callback`, where links started from Firefly Pocket come back, and `https://<IMPORT_HOSTNAME>/eb-callback`, for the importer's own UI. Caddy sends a callback whose state starts with `fx-` to the importer fork on either host.
 4. `docker compose up -d importer`
 5. Open `https://import.<domain>` (basic auth) and **run one import interactively**: link the bank, map each bank account to a Firefly asset account, configure duplicate detection.
 6. Download the resulting config and bring it into the importer's database as a **connection**. Only its bank, Enable Banking session and account mapping are kept; every other setting comes from the shared, committed `config/importer-base.json`, so all banks import the same way. The command refuses a config whose settings differ from the base, rather than silently changing how that bank imports:
