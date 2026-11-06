@@ -1,15 +1,18 @@
 #!/usr/bin/env python3
 """Firefly Pocket Console: setup in the browser, on admin.<domain>.
 
-Setup UI steps 4 and 5. Until Firefly III has its account, every other host
+Setup UI steps 4 to 6. Until Firefly III has its account, every other host
 sends the browser here (the Caddyfile's setup gate), and this asks for the
 setup code that `scripts/firefly-pocket setup web` printed on the server. Its
 first page sets the domain, your email, your name and the timezone, and shows
 whether each name points at this server and has its certificate. Its second
 asks for your Firefly III account's password; the server then makes the
 account and a token for each app inside Firefly III, and starts everything,
-which opens the gate. The rest of setup runs over SSH for now, until the
-console takes those steps over too.
+which opens the gate. Its third connects the bank: the server makes a key for
+an Enable Banking application, this hands out its certificate, and the server
+keeps the application's ID once Enable Banking takes a request signed with the
+key for it. Finish ends the setup code. Suggestions, alerts, backups and
+updates run over SSH for now, until the console takes those steps over too.
 
 It is built so that taking it over gains little:
 
@@ -18,10 +21,11 @@ It is built so that taking it over gains little:
   each request as `firefly-pocket config set` would, and applies it
   (scripts/console.sh). Each carries the setup code, which the agent checks
   too. What it shows comes from /status, which the agent writes and which
-  holds no secret. The password goes into its request and nowhere else.
-- The setup code works only until setup is finished: FIREFLY_POCKET_SETUP is
-  "done" once the importer has its Firefly III token. After that the console
-  only says where things are, and the agent refuses its requests too.
+  holds no secret. The password goes into its request and nowhere else, and
+  the bank's private key never leaves the server.
+- The setup code works only until setup is finished, when the server removes
+  it and starts this again without it. After that the console only says where
+  things are, and the agent refuses its requests too.
 - It shares a network with Caddy only, not with the apps or Postgres.
 
 Standard library only: compose runs it on the stock python image, with this
@@ -143,12 +147,14 @@ SERVER_FIELDS = (
 STEPS = (
     ("Server", "/server"),
     ("Firefly III account", "/account"),
-    ("Bank connection", None),
+    ("Bank connection", "/bank"),
     ("Suggestions", None),
     ("Alerts", None),
     ("Backups", None),
     ("Updates", None),
+    ("Finish", "/finish"),
 )
+SERVER, ACCOUNT, BANK, FINISH = 0, 1, 2, 7
 
 # Firefly III's minimum, which the agent checks again.
 MIN_PASSWORD = 16
@@ -160,7 +166,17 @@ STALE_SECONDS = 40 * 60
 OUTCOME = {
     "server": ("Saved", "Not saved", "Saving"),
     "account": ("Done", "Not done", "Making your account"),
+    "bank_key": ("Made", "Not made", "Making the key"),
+    "bank": ("Saved", "Not saved", "Checking with Enable Banking"),
+    "finish": ("Setup is finished", "Not finished", "Finishing"),
 }
+# The page each request goes back to, and the step after it once it is done.
+BACK = {"server": "/server", "account": "/account", "bank_key": "/bank", "bank": "/bank", "finish": "/finish"}
+NEXT = {"server": ("/account", "Firefly III account"), "account": ("/bank", "Bank connection"), "bank": ("/finish", "Finish")}
+
+# As scripts/config.sh checks ENABLE_BANKING_APP_ID.
+APP_ID_RE = re.compile(r"[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}")
+APP_ID_EXAMPLE = "1b4e28ba-2fa1-11d2-883f-0016d3cca427"
 
 ROLES = {
     "admin": "this console",
@@ -289,6 +305,38 @@ def read_status(path: Path) -> dict:
     return data if isinstance(data, dict) else {}
 
 
+def part(state: dict, key: str) -> dict:
+    value = state.get(key)
+    return value if isinstance(value, dict) else {}
+
+
+def hosts_of(state: dict) -> dict[str, str]:
+    return {str(n.get("role")): str(n.get("host")) for n in state.get("names") or []
+            if isinstance(n, dict) and n.get("host")}
+
+
+def account_made(state: dict) -> bool:
+    """Firefly III has its account: the agent says so. Its status from before
+    the bank step said setup_done for the same thing."""
+    if "account" in state:
+        return state.get("account") is True
+    return state.get("setup_done") is True
+
+
+def server_saved(state: dict) -> bool:
+    """The account needs the Server step's email, and the timezone saved with
+    it; the agent checks this too."""
+    settings = part(state, "settings")
+    return bool(settings.get("SITE_OWNER")) and bool(settings.get("TZ"))
+
+
+def latest(state: dict, action: str = "") -> dict:
+    """The last request the agent has a word on, of that action if one is named."""
+    requests = part(state, "requests")
+    mine = [r for r in requests.values() if isinstance(r, dict) and (not action or r.get("action") == action)]
+    return max(mine, key=lambda r: str(r.get("at") or ""), default={})
+
+
 # ------------------------------------------------------------- the app ---
 @dataclass
 class Request:
@@ -329,7 +377,6 @@ class Console:
     def __init__(
         self,
         *,
-        setup_done: bool,
         code: str,
         inbox: Path,
         status_file: Path,
@@ -340,7 +387,6 @@ class Console:
         fail_delay: float = 1.0,
         check_names=None,
     ):
-        self.setup_done = setup_done
         self.code = normalize_code(code)
         self.inbox = inbox
         self.status_file = status_file
@@ -360,7 +406,6 @@ class Console:
     @classmethod
     def from_env(cls, env=os.environ) -> Console:
         return cls(
-            setup_done=env.get("FIREFLY_POCKET_SETUP") == "done",
             code=env.get("SETUP_CODE", ""),
             inbox=Path(env.get("CONSOLE_INBOX", "/inbox")),
             status_file=Path(env.get("CONSOLE_STATUS", "/status/status.json")),
@@ -378,9 +423,12 @@ class Console:
             return Response(405, b"", headers=[("Allow", "GET, HEAD, POST")])
         if req.method == "POST" and not same_origin(req):
             return self.page(403, "Refused", "<h1>Refused</h1><p>That form was not sent from this page.</p>")
-        if self.setup_done:
-            return self.finished()
-        if not self.code:
+        state = read_status(self.status_file)
+        # Finished: the server removed the code, and starts this again without
+        # it; until then the agent refuses what this would send.
+        if not self.code or (state.get("setup_done") is True and "account" in state):
+            if account_made(state):
+                return self.finished(state)
             return self.page(
                 503, "Not set up",
                 "<h1>This server is not set up yet</h1><p>It has no setup code either. On the server:</p>"
@@ -392,12 +440,21 @@ class Console:
             return self.login_page()
         if path == "/logout" and req.method == "POST":
             return self.logout(req)
+        post = req.method == "POST"
         if path == "/":
-            return redirect("/server")
+            return redirect(next_step(state))
         if path == "/server":
-            return self.save_server(req) if req.method == "POST" else self.server_page(req)
+            return self.save_server(req) if post else self.server_page(req)
         if path == "/account":
-            return self.save_account(req) if req.method == "POST" else self.account_page(req)
+            return self.save_account(req) if post else self.account_page(req)
+        if path == "/bank":
+            return self.save_bank(req) if post else self.bank_page(req)
+        if path == "/bank/key" and post:
+            return self.make_key(req)
+        if path == "/bank/certificate" and not post:
+            return self.certificate()
+        if path == "/finish":
+            return self.save_finish(req) if post else self.finish_page(req)
         match = re.fullmatch(r"/requests/([0-9a-f]{32})", path)
         if match and req.method != "POST":
             return self.request_page(req, match.group(1))
@@ -428,7 +485,7 @@ class Console:
             self.sessions = {t: until for t, until in self.sessions.items() if until > now}
             self.sessions[token] = now + SESSION_SECONDS
         cookie = f"{COOKIE}={token}; Path=/; Secure; HttpOnly; SameSite=Strict; Max-Age={SESSION_SECONDS}"
-        return redirect("/server", [("Set-Cookie", cookie)])
+        return redirect(next_step(read_status(self.status_file)), [("Set-Cookie", cookie)])
 
     def logout(self, req: Request) -> Response:
         with self.lock:
@@ -439,7 +496,7 @@ class Console:
         body = f"""
 <section class="narrow">
   <h1>Setup</h1>
-  <p>This server is being set up. Until its Firefly III account exists, this console is all it shows.</p>
+  <p>This server is being set up, and until that is finished this console asks for its setup code.</p>
   <form method="post" action="/login">
     <label for="code">Setup code</label>
     <input id="code" name="code" required autocomplete="off" autocapitalize="characters" spellcheck="false"
@@ -474,24 +531,40 @@ class Console:
             )
         else:
             names_html = self.names_html(names, v4, v6, domain)
-        body = f"""
-<div class="setup">
-  {stepper(0)}
-  <section class="panel">
-    <h1>Server</h1>
-    {note}
+        if account_made(state):
+            # Every service runs with these now: the wizard changes them, and starts everything again.
+            rows = "".join(
+                f'<tr><th scope="row">{esc(f.label)}</th><td>{esc(settings.get(f.key) or "")}</td></tr>'
+                for f in SERVER_FIELDS
+            )
+            form = f"""
+    <p>Firefly III has its account, so these stay as they are here. To change one, on the server:
+    <code>scripts/firefly-pocket setup domain</code>, or <code>setup you</code>.</p>
+    <table class="settings"><tbody>{rows}</tbody></table>"""
+            after = '<p><a class="button" href="/bank">Next: Bank connection</a></p>'
+        else:
+            form = f"""
     <p>Your domain, your email and the timezone. Save sends them to the server, which checks each one again
     before it keeps it.</p>
     <form method="post" action="/server" novalidate>
       {fields}
       <datalist id="timezones">{datalist}</datalist>
       <button type="submit">Save</button>
-    </form>
+    </form>"""
+            after = """
+    <p>Once these are saved: your Firefly III account. The names need not be ready for it.</p>
+    <p><a class="button" href="/account">Firefly III account</a></p>"""
+        body = f"""
+<div class="setup">
+  {stepper(SERVER, state)}
+  <section class="panel">
+    <h1>Server</h1>
+    {note}
+    {form}
     <h2>Names</h2>
     {names_html}
     <h2>Next</h2>
-    <p>Once these are saved: your Firefly III account. The names need not be ready for it.</p>
-    <p><a class="button" href="/account">Firefly III account</a></p>
+    {after}
   </section>
 </div>"""
         return self.page(status, "Server", body, signed_in=True)
@@ -548,6 +621,8 @@ class Console:
             return list(pool.map(one, names))
 
     def save_server(self, req: Request) -> Response:
+        if account_made(read_status(self.status_file)):
+            return self.server_page(req, 409)
         form = req.form()
         values: dict[str, str] = {}
         errors: dict[str, str] = {}
@@ -599,24 +674,38 @@ class Console:
             return False
         return self.clock() - at.timestamp() > STALE_SECONDS
 
-    def server_saved(self) -> bool:
-        """The account needs the Server step's email, and the timezone saved
-        with it; the agent checks this too."""
-        settings = read_status(self.status_file).get("settings")
-        return isinstance(settings, dict) and bool(settings.get("SITE_OWNER")) and bool(settings.get("TZ"))
-
     def account_page(self, req: Request, status: int = 200, errors=None, note: str = "") -> Response:
         running = self.account_running()
         if running:
             return redirect(f"/requests/{running}")
         state = read_status(self.status_file)
-        settings = state.get("settings") if isinstance(state.get("settings"), dict) else {}
-        hosts = {n.get("role"): n.get("host") for n in state.get("names") or [] if isinstance(n, dict)}
+        settings = part(state, "settings")
+        hosts = hosts_of(state)
         email = str(settings.get("SITE_OWNER") or "")
-        if not self.server_saved():
+        firefly = str(hosts.get("firefly") or "")
+        where = f" at <code>https://{esc(firefly)}</code>" if firefly else ""  # none before a domain
+        if account_made(state):
+            last = latest(state, "account")
+            problem = ""
+            if last.get("state") == "failed":  # the account is made, but not everything started
+                problem = f'<p class="error">The server\'s last try did not finish: {esc(last.get("message") or "")}</p>'
             body = f"""
 <div class="setup">
-  {stepper(1)}
+  {stepper(ACCOUNT, state)}
+  <section class="panel">
+    <h1>Firefly III account</h1>
+    <p class="good">Done: you sign in{where} as {esc(email)}, and each app has its token.</p>
+    {problem}
+    <p>Turn on two-factor authentication there: Options, Profile.</p>
+    <h2>Next</h2>
+    <p><a class="button" href="/bank">Next: Bank connection</a></p>
+  </section>
+</div>"""
+            return self.page(status, "Firefly III account", body, signed_in=True)
+        if not server_saved(state):
+            body = f"""
+<div class="setup">
+  {stepper(ACCOUNT, state)}
   <section class="panel">
     <h1>Firefly III account</h1>
     <p>Save the Server step first: the account's email is the one it keeps.</p>
@@ -625,11 +714,9 @@ class Console:
 </div>"""
             return self.page(status, "Firefly III account", body, signed_in=True)
         errors = errors or {}
-        firefly = str(hosts.get("firefly") or "")
-        where = f" at <code>https://{esc(firefly)}</code>" if firefly else ""  # none before a domain
         body = f"""
 <div class="setup">
-  {stepper(1)}
+  {stepper(ACCOUNT, state)}
   <section class="panel">
     <h1>Firefly III account</h1>
     {note}
@@ -650,7 +737,7 @@ class Console:
     </form>
     <p class="quiet">It takes a few minutes: the server downloads every service, starts Firefly III, which
     sets up its database the first time, makes the account and the tokens, then starts everything else.
-    Then every name opens, and the setup code works no more.</p>
+    Then every name opens.</p>
   </section>
 </div>"""
         return self.page(status, "Firefly III account", body, signed_in=True)
@@ -659,7 +746,8 @@ class Console:
         running = self.account_running()
         if running:
             return redirect(f"/requests/{running}")
-        if not self.server_saved():
+        state = read_status(self.status_file)
+        if account_made(state) or not server_saved(state):
             return self.account_page(req, 409)
         form = req.form()
         password, again = form.get("password", ""), form.get("password2", "")
@@ -672,13 +760,189 @@ class Console:
             errors["password2"] = "The two differ"
         if errors:
             return self.account_page(req, 400, errors)
+        return self.hand_over(req, "account", {"password": password}, self.account_page)
+
+    # --------------------------------------------------------------- bank ---
+    def bank_page(self, req: Request, status: int = 200, value: str | None = None, error: str = "",
+                  note: str = "") -> Response:
+        state = read_status(self.status_file)
+        if not account_made(state):
+            body = f"""
+<div class="setup">
+  {stepper(BANK, state)}
+  <section class="panel">
+    <h1>Bank connection</h1>
+    <p>Make the Firefly III account first: the bank importer needs its token.</p>
+    <p><a class="button" href="/account">Firefly III account</a></p>
+  </section>
+</div>"""
+            return self.page(status, "Bank connection", body, signed_in=True)
+        bank = part(state, "bank")
+        hosts = hosts_of(state)
+        app_id = str(bank.get("app_id") or "")
+        cert = str(bank.get("certificate") or "")
+        urls = "".join(f"<li><code>{esc(u)}</code></li>" for u in bank.get("redirect_urls") or [] if isinstance(u, str))
+        legal = hosts.get("legal", "")
+        if not bank.get("key"):
+            steps = """
+    <h2>1. A key for your application</h2>
+    <p>The server makes a key and a certificate for it. You upload the certificate when you register the
+    application with Enable Banking; the private key never leaves the server.</p>
+    <form method="post" action="/bank/key"><button type="submit">Make the key</button></form>"""
+        else:
+            if cert:
+                register = f"""
+    <h2>1. Register the application</h2>
+    <p>In Enable Banking's control panel, register a new application:</p>
+    <ol class="todo">
+      <li>Environment: <strong>production</strong>. A sandbox application only ever sees a mock bank.</li>
+      <li>Its certificate: upload this one, made on this server for it.
+        <p><a class="button" href="/bank/certificate" download>Download the certificate</a></p>
+        <details><summary>Or copy it</summary><pre>{esc(cert)}</pre></details></li>
+      <li>Redirect URLs, both:<ul>{urls}</ul></li>
+      <li>Privacy policy <code>https://{esc(legal)}/privacy</code>, terms <code>https://{esc(legal)}/terms</code></li>
+      <li>Then activate it by linking your own accounts: restricted mode, free for personal use.</li>
+    </ol>"""
+            else:
+                register = f"""
+    <h2>1. The application</h2>
+    <p>This server's key was set by hand (<code>scripts/set-eb-key.sh</code>), for an application of its own,
+    so there is no certificate to hand out here. The application needs these redirect URLs:</p>
+    <ul>{urls}</ul>"""
+            shown = app_id if value is None else value
+            invalid = ' aria-invalid="true"' if error else ""
+            steps = f"""{register}
+    <h2>2. Its application ID</h2>
+    <form method="post" action="/bank" novalidate>
+      <div class="field">
+        <label for="app_id">Application ID</label>
+        <input id="app_id" name="app_id" value="{esc(shown)}" placeholder="{APP_ID_EXAMPLE}"{invalid}
+               autocomplete="off" spellcheck="false" aria-describedby="app_id-help{' app_id-error' if error else ''}">
+        {f'<p class="error" id="app_id-error">{esc(error)}</p>' if error else ''}
+        <p class="quiet" id="app_id-help">Enable Banking's control panel shows it with the application. The
+        server keeps it once Enable Banking takes a request signed with this server's key for it.</p>
+      </div>
+      <button type="submit">Check and save</button>
+    </form>
+    <details class="new-key"><summary>A new key</summary>
+      <p>Only for a new application: the one registered with {'this certificate' if cert else 'the key set by hand'}
+      stops working on this server, and its ID is removed here.</p>
+      <form method="post" action="/bank/key"><button type="submit">Make a new key</button></form>
+    </details>"""
+        saved = f'<p class="good">This server uses the application <code>{esc(app_id)}</code>.</p>' if app_id else ""
+        if app_id:
+            after = '<p><a class="button" href="/finish">Next: Finish</a></p>'
+        else:
+            after = """<p>Firefly Pocket links no bank until this is done. <a href="/finish">Skip it for now</a>: on the
+    server, <code>scripts/firefly-pocket setup bank</code> does it later.</p>"""
+        body = f"""
+<div class="setup">
+  {stepper(BANK, state)}
+  <section class="panel">
+    <h1>Bank connection</h1>
+    {note}
+    <p>Firefly Pocket imports from your bank through Enable Banking
+    (<a href="https://enablebanking.com/" rel="noreferrer">enablebanking.com</a>), free for your own accounts.
+    Check first that it covers your bank.</p>
+    {saved}
+    {steps}
+    <h2>Next</h2>
+    {after}
+  </section>
+</div>"""
+        return self.page(status, "Bank connection", body, signed_in=True)
+
+    def make_key(self, req: Request) -> Response:
+        if not account_made(read_status(self.status_file)):
+            return self.bank_page(req, 409)
+        return self.hand_over(req, "bank_key", {}, self.bank_page)
+
+    def save_bank(self, req: Request) -> Response:
+        state = read_status(self.status_file)
+        if not account_made(state) or not part(state, "bank").get("key"):
+            return self.bank_page(req, 409)
+        value = req.form().get("app_id", "").strip()
+        if not APP_ID_RE.fullmatch(value):
+            return self.bank_page(req, 400, value, f"An application ID, such as {APP_ID_EXAMPLE}")
+        return self.hand_over(req, "bank", {"app_id": value}, self.bank_page)
+
+    def certificate(self) -> Response:
+        """The certificate the server made for the application: public, it is
+        what Enable Banking checks the key's signatures with."""
+        cert = str(part(read_status(self.status_file), "bank").get("certificate") or "")
+        if not cert.startswith("-----BEGIN CERTIFICATE-----"):
+            return self.page(404, "Not found", '<h1>Not found</h1><p>No certificate yet. <a href="/bank">Bank connection</a></p>',
+                             signed_in=True)
+        return Response(200, cert.encode(), "application/x-pem-file",
+                        [("Content-Disposition", 'attachment; filename="firefly-pocket-enable-banking.crt"')])
+
+    def hand_over(self, req: Request, action: str, fields: dict, page) -> Response:
+        """A request to the agent, then its page; on no inbox, the form again."""
         try:
-            rid = write_request(self.inbox, "account", self.code, {"password": password})
+            rid = write_request(self.inbox, action, self.code, fields)
         except OSError:
-            return self.account_page(req, 503, note=NO_INBOX)
+            return page(req, 503, note=NO_INBOX)
         with self.lock:
-            self.pending[rid] = (self.clock(), "account", "")
+            self.pending[rid] = (self.clock(), action, "")
         return redirect(f"/requests/{rid}")
+
+    # ------------------------------------------------------------- finish ---
+    def finish_page(self, req: Request, status: int = 200, note: str = "") -> Response:
+        state = read_status(self.status_file)
+        if not account_made(state):
+            body = f"""
+<div class="setup">
+  {stepper(FINISH, state)}
+  <section class="panel">
+    <h1>Finish</h1>
+    <p>Make the Firefly III account first: finishing before it would leave this server showing only this
+    console, with no code to open it.</p>
+    <p><a class="button" href="/account">Firefly III account</a></p>
+  </section>
+</div>"""
+            return self.page(status, "Finish", body, signed_in=True)
+        settings = part(state, "settings")
+        hosts = hosts_of(state)
+        app_id = str(part(state, "bank").get("app_id") or "")
+        firefly = hosts.get("firefly", "")
+        bank = (f"the application <code>{esc(app_id)}</code>" if app_id else
+                '<span class="bad">not yet: Firefly Pocket links no bank until it is.</span> On the server, '
+                "<code>scripts/firefly-pocket setup bank</code> does it later.")
+        body = f"""
+<div class="setup">
+  {stepper(FINISH, state)}
+  <section class="panel">
+    <h1>Finish</h1>
+    {note}
+    <table class="settings"><tbody>
+      <tr><th scope="row"><a href="/server">Server</a></th>
+          <td>{esc(settings.get("DOMAIN") or "")}, {esc(settings.get("SITE_OWNER") or "")}, {esc(settings.get("TZ") or "")}</td></tr>
+      <tr><th scope="row"><a href="/account">Firefly III account</a></th>
+          <td>made: you sign in at <code>https://{esc(firefly)}</code></td></tr>
+      <tr><th scope="row"><a href="/bank">Bank connection</a></th><td>{bank}</td></tr>
+    </tbody></table>
+    <h2>Left for the server, over SSH</h2>
+    <p>These have no page here yet. On the server, each is <code>scripts/firefly-pocket setup &lt;step&gt;</code>,
+    before or after Finish:</p>
+    <ul>
+      <li><code>suggestions</code>: an Anthropic or Gemini key, for category suggestions</li>
+      <li><code>alerts</code>: an ntfy topic for alerts on your phone, and healthchecks.io checks</li>
+      <li><code>backups</code>: a restic repository, off this server</li>
+      <li><code>updates</code>: the deploy agent. It also runs the nightly jobs: the bank import, the backup and
+      the restore tests. Until it is on, nothing runs on a schedule.</li>
+    </ul>
+    <h2>Finish setup</h2>
+    <p>Then the setup code works no more, and this console only says where things are, until it signs in with
+    Firefly III.</p>
+    <form method="post" action="/finish"><button type="submit">Finish setup</button></form>
+  </section>
+</div>"""
+        return self.page(status, "Finish", body, signed_in=True)
+
+    def save_finish(self, req: Request) -> Response:
+        if not account_made(read_status(self.status_file)):
+            return self.finish_page(req, 409)
+        return self.hand_over(req, "finish", {}, self.finish_page)
 
     def request_page(self, req: Request, rid: str) -> Response:
         state = read_status(self.status_file)
@@ -689,17 +953,23 @@ class Console:
         if isinstance(result, dict):
             action = str(result.get("action") or action)
         done, not_done, working = OUTCOME.get(action, OUTCOME["server"])
-        back = "/account" if action == "account" else "/server"
+        back = BACK.get(action, "/server")
         if isinstance(result, dict) and result.get("state") in ("applied", "refused", "failed"):
             message = esc(result.get("message") or "")
             if result.get("state") != "applied":
                 return self.page(200, not_done, f'<section class="narrow"><h1>{not_done}</h1><p class="error">{message}</p>'
                                  f'<p><a class="button" href="{back}">Back to setup</a></p></section>', signed_in=True)
+            if action == "bank_key":  # nothing to read: the bank page shows the certificate
+                return redirect("/bank")
             links = f'<a class="button" href="{back}">Back to setup</a>'
-            if action == "server":
-                links = '<a class="button" href="/account">Next: Firefly III account</a> <a href="/server">Back to Server</a>'
+            if action in NEXT:
+                path, name = NEXT[action]
+                links = f'<a class="button" href="{path}">Next: {esc(name)}</a> <a href="{back}">Back</a>'
+            elif action == "finish":
+                links = 'This console starts again without the code: <a href="/">open it again</a> in a moment.'
             return self.page(200, done, f'<section class="narrow"><h1>{done}</h1><p>{message}</p><p>{links}</p></section>',
                              signed_in=True)
+        takes = "This takes a few minutes." if action == "account" else "This takes a few seconds."
         if isinstance(result, dict):  # running: the server says how far it got
             if self.stale(result):
                 body = f"""<section class="narrow"><h1>{not_done}</h1>
@@ -709,7 +979,7 @@ class Console:
                 return self.page(200, not_done, body, signed_in=True)
             body = f"""<section class="narrow"><h1>{working}</h1>
   <p>{esc(result.get("message") or "")}</p>
-  <p class="quiet">This takes a few minutes. This page looks again every few seconds; reload it if it shows an
+  <p class="quiet">{takes} This page looks again every few seconds; reload it if it shows an
   error while Caddy starts again.</p></section>"""
             return self.page(202, working, body, refresh=3, signed_in=True)
         if not started:
@@ -729,39 +999,35 @@ class Console:
   applies it runs: <code>systemctl status firefly-pocket-console.path</code>, or apply it by hand:
   <code>scripts/firefly-pocket console apply</code></p>"""
         body = f"""<section class="narrow"><h1>{working}</h1>
-  <p>The server checks what you sent and applies it. This page looks again every few seconds; reload it if it
-  shows an error while Caddy starts again.</p>{hint}</section>"""
+  <p>The server checks what you sent and applies it. {takes} This page looks again every few seconds; reload it
+  if it shows an error while Caddy starts again.</p>{hint}</section>"""
         return self.page(202, working, body, refresh=3, signed_in=True)
 
     # ----------------------------------------------------------- finished ---
-    def finished(self) -> Response:
-        state = read_status(self.status_file)
-        hosts = {n.get("role"): n.get("host") for n in state.get("names") or [] if isinstance(n, dict)}
+    def finished(self, state: dict) -> Response:
+        hosts = hosts_of(state)
         links = ""
         for role in ("firefly", "app"):
             if hosts.get(role):
                 links += f'<li>{esc(ROLES[role])}: <a href="https://{esc(hosts[role])}/">https://{esc(hosts[role])}/</a></li>'
-        # The account step can fail after the account is made, when starting the rest.
-        requests = state.get("requests") if isinstance(state.get("requests"), dict) else {}
-        latest = max((r for r in requests.values() if isinstance(r, dict)), key=lambda r: str(r.get("at") or ""),
-                     default={})
+        # A step can fail after the account is made: starting the rest, say.
+        last = latest(state)
         problem = ""
-        if latest.get("state") == "failed":
-            problem = f'<p class="error">The server\'s last step did not finish: {esc(latest.get("message") or "")}</p>'
+        if last.get("state") == "failed":
+            problem = f'<p class="error">The server\'s last step did not finish: {esc(last.get("message") or "")}</p>'
         body = f"""<section class="narrow">
-  <h1>Firefly III has its account</h1>
-  <p>So every name is open, and the setup code works no more.</p>
+  <h1>Setup is finished</h1>
+  <p>Firefly III has its account, every name is open, and the setup code works no more.</p>
   {problem}
   {f'<ul>{links}</ul>' if links else ''}
   <p>Sign in to Firefly III with your email and password, and turn on two-factor authentication there:
   Options, Profile. Firefly Pocket asks for a token: in Firefly III, Options, Profile, OAuth, Personal Access
   Tokens, Create one named after the phone.</p>
-  <h2>Next, over SSH</h2>
-  <p>The bank connection, suggestions, alerts, backups and updates. On the server,
-  <code>scripts/firefly-pocket setup</code> goes through every step; Enter keeps what is set. Changing
-  settings here comes later, behind Sign in with Firefly III.</p>
+  <h2>Anything left, over SSH</h2>
+  <p>On the server, <code>scripts/firefly-pocket setup &lt;step&gt;</code> sets up or changes one step: bank,
+  suggestions, alerts, backups, updates. Changing settings here comes later, behind Sign in with Firefly III.</p>
 </section>"""
-        return self.page(200, "Firefly III has its account", body)
+        return self.page(200, "Setup is finished", body)
 
     # -------------------------------------------------------------- pages ---
     def page(self, status: int, title: str, main: str, refresh: int | None = None, signed_in: bool = False) -> Response:
@@ -788,15 +1054,27 @@ class Console:
         return Response(status, doc.encode("utf-8"))
 
 
-def stepper(current: int) -> str:
+def next_step(state: dict) -> str:
+    """The first page with something left to do."""
+    if account_made(state):
+        return "/bank"
+    return "/account" if server_saved(state) else "/server"
+
+
+def stepper(current: int, state: dict) -> str:
+    done = {SERVER} if server_saved(state) else set()
+    if account_made(state):
+        done.add(ACCOUNT)
+    if part(state, "bank").get("app_id"):
+        done.add(BANK)
     items = ""
     for i, (name, path) in enumerate(STEPS):
-        state = "now" if i == current else ("done" if i < current else "later")
+        kind = "now" if i == current else ("done" if i in done else "later")
         aria = ' aria-current="step"' if i == current else ""
         label = f'<a href="{path}">{esc(name)}</a>' if path and i != current else esc(name)
-        items += f'<li class="{state}"{aria}>{label}</li>'
+        items += f'<li class="{kind}"{aria}>{label}</li>'
     return f"""<nav class="steps" aria-label="Setup steps"><ol>{items}</ol>
-    <p class="quiet">After the account, the steps run over SSH for now.</p></nav>"""
+    <p class="quiet">Suggestions, alerts, backups and updates run over SSH for now.</p></nav>"""
 
 
 def password_field(name: str, label: str, error: str, help_text: str) -> str:
@@ -918,7 +1196,7 @@ def main() -> None:
         raise SystemExit(0)
 
     signal.signal(signal.SIGTERM, stop)
-    state = "setup finished" if console.setup_done else ("waiting for the setup code" if console.code else "no setup code")
+    state = "waiting for the setup code" if console.code else "no setup code: setup is finished, or not begun"
     print(f"Firefly Pocket Console on :{port}, {state}", flush=True)
     try:
         server.serve_forever()

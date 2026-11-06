@@ -110,10 +110,12 @@ services:
 
   # -------------------------------------------------------------- console ---
   # The Firefly Pocket Console on admin.<domain> (Setup UI). Until Firefly III
-  # has its account it is all this server shows, and asks for the setup code
-  # that `scripts/firefly-pocket setup web` prints; after that it only says
-  # where things are. Its source is services/console, run on the stock image,
-  # mounted read-only.
+  # has its account it is all this server shows. It asks for the setup code
+  # that `scripts/firefly-pocket setup web` prints until setup is finished, which
+  # removes the code; after that it only says where things are. Whether Firefly
+  # III has its account it reads from the agent's status, not from here, so
+  # making the account does not start it again and end your session. Its source
+  # is services/console, run on the stock image, mounted read-only.
   #
   # It holds no secret but that code, and cannot touch Docker or the settings.
   # It can add a request to console/inbox, which it cannot list, and read
@@ -138,7 +140,6 @@ services:
       - ./console/inbox:/inbox
       - ./console/status:/status:ro
     environment:
-      FIREFLY_POCKET_SETUP: ${IMPORTER_FIREFLY_TOKEN:+done}
       SETUP_CODE: ${SETUP_CODE:-}
       # Which certificates it checks: those of Let's Encrypt production only.
       ACME_CA: ${ACME_CA:-https://acme-v02.api.letsencrypt.org/directory}

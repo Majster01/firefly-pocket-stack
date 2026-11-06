@@ -96,19 +96,13 @@ if [ -z "$APP_ID" ]; then
   exit 0
 fi
 
-b64url() { openssl base64 -A | tr '+/' '-_' | tr -d '='; }
-NOW="$(date +%s)"
-HDR="$(printf '{"typ":"JWT","alg":"RS256","kid":"%s"}' "$APP_ID" | b64url)"
-PLD="$(printf '{"iss":"enablebanking.com","aud":"api.enablebanking.com","iat":%s,"exp":%s}' "$NOW" "$((NOW + 3600))" | b64url)"
-SIG="$(printf '%s.%s' "$HDR" "$PLD" | openssl dgst -sha256 -sign "$PEM" -binary | b64url)"
-JWT="$HDR.$PLD.$SIG"
-
-# With no answer at all curl writes 000 itself, and fails.
-HTTP_CODE="$(curl -s -o /tmp/eb-app.$$ -w '%{http_code}' --max-time 25 \
-  -H "Authorization: Bearer $JWT" https://api.enablebanking.com/application || true)"
-HTTP_CODE="${HTTP_CODE:-000}"
-APP_JSON="$(cat "/tmp/eb-app.$$" 2>/dev/null || true)"
-rm -f "/tmp/eb-app.$$"
+# Signed and sent as the setup wizard and the console check it (bank.sh), with
+# the key as the store now has it.
+# shellcheck source=bank.sh
+source "$REPO_ROOT/scripts/bank.sh"
+eb_check "$B64" "$APP_ID" || true
+HTTP_CODE="$EB_STATUS"
+APP_JSON="$EB_ANSWER"
 
 # Surface the API's own error rather than reporting a useless "unknown".
 # A 401 "Wrong signature" almost always means the key and the application ID
@@ -147,7 +141,7 @@ for host in $HOSTS; do
     echo "==> WARNING     : https://$host/eb-callback is not a redirect URL of this application; add it in the control panel"
   fi
 done
-printf '%s' "$APP_JSON" | jq -r 'if (.services // []) | index("PIS") then "==> WARNING     : app requests PIS (payment initiation) — not needed by Firefly Pocket" else "==> services    : \(.services // [] | join(\", \"))" end' 2>/dev/null
+printf '%s' "$APP_JSON" | jq -r 'if (.services // []) | index("PIS") then "==> WARNING     : app requests PIS (payment initiation) — not needed by Firefly Pocket" else "==> services    : \(.services // [] | join(", "))" end' 2>/dev/null
 
 if [ "$ENVIRONMENT" = "SANDBOX" ]; then
   cat <<'EOF'

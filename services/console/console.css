@@ -129,3 +129,13 @@ table { border-collapse: collapse; width: 100%; margin: 8px 0 12px; font-size: 0
 th, td { text-align: left; vertical-align: top; padding: 6px 8px; border-bottom: 1px solid var(--edge); }
 th { font-weight: 600; }
 .names td, .records td { overflow-wrap: anywhere; }
+
+.settings th { width: 40%; font-weight: 600; }
+/* Host names and URLs wrap anywhere: on a phone they are wider than the panel. */
+.panel p code, .panel li code, .settings td { overflow-wrap: anywhere; }
+ol.todo > li { margin: 0 0 10px; }
+ol.todo p { margin: 6px 0; }
+details { margin: 8px 0; }
+summary { cursor: pointer; color: var(--accent); }
+details pre { font-size: 0.8rem; }
+.new-key { margin-top: 24px; }

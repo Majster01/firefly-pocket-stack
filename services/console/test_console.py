@@ -30,6 +30,8 @@ from console import Console, NameCheck, Request, check, dns_verdict, normalize_c
 
 CODE = "7K2M-Q9TB-0XH4-PVRA"
 HOST = "admin.fx.example.com"
+APP_ID = "1b4e28ba-2fa1-11d2-883f-0016d3cca427"
+CERT = "-----BEGIN CERTIFICATE-----\nMIIBszCCAVmgAwIBAgIU\n-----END CERTIFICATE-----\n"
 
 
 class Clock:
@@ -119,7 +121,7 @@ class ConsoleTest(unittest.TestCase):
             return [NameCheck(n["role"], n["host"], True, "points here", True, "valid until 2027-02-01") for n in names]
 
         args = dict(
-            setup_done=False, code=CODE, inbox=self.inbox, status_file=self.status,
+            code=CODE, inbox=self.inbox, status_file=self.status,
             timezones=["Europe/Ljubljana", "Etc/UTC"], clock=self.clock, fail_delay=0, check_names=check_names,
         )
         args.update(kw)
@@ -312,27 +314,41 @@ class ConsoleTest(unittest.TestCase):
         self.assertIn(b"compose/console/inbox", resp.body)
 
     def test_finished_refuses_the_code(self):
-        self.write_status()
-        app = self.make(setup_done=True)
+        # Finish removed the code, and the console started again without it.
+        self.write_status(account=True, setup_done=True)
+        app = self.make(code="")
         resp = self.call("GET", "/", app=app)
         self.assertEqual(resp.status, 200)
-        self.assertIn(b"Firefly III has its account", resp.body)
+        self.assertIn(b"Setup is finished", resp.body)
         self.assertIn(b"https://firefly.fx.example.com/", resp.body)
         self.assertNotIn(b"did not finish", resp.body)
         resp = self.call("POST", "/login", f"code={CODE}", app=app)
-        self.assertIn(b"Firefly III has its account", resp.body)
+        self.assertIn(b"Setup is finished", resp.body)
         self.assertFalse(any(name == "Set-Cookie" for name, _ in resp.headers))
-        for path, body in (("/server", "domain=evil.example"), ("/account", "password=x" * 20)):
+        for path, body in (("/server", "domain=evil.example"), ("/account", "password=x" * 20),
+                           ("/bank", "app_id=" + APP_ID), ("/bank/key", ""), ("/finish", "")):
             self.call("POST", path, body, app=app)
         self.assertEqual(self.requests(), [])
 
+    def test_finished_before_the_console_starts_again(self):
+        # The agent removed the code, and says so; this console still has it until it starts again.
+        self.write_status(account=True, setup_done=True)
+        resp = self.call("POST", "/login", f"code={CODE}")
+        self.assertIn(b"Setup is finished", resp.body)
+        self.assertFalse(any(name == "Set-Cookie" for name, _ in resp.headers))
+
+    def test_a_server_set_up_before_this_version(self):
+        # Its status said setup_done for the account, and it never had a code.
+        self.write_status(setup_done=True)
+        self.assertIn(b"Setup is finished", self.call("GET", "/", app=self.make(code="")).body)
+
     def test_finished_says_when_the_last_step_failed(self):
         # The account is made, so the gate opened, but not everything started.
-        self.write_status(requests={
+        self.write_status(account=True, setup_done=True, requests={
             "ab" * 16: {"state": "applied", "message": "Saved: the timezone.", "action": "server", "at": "2026-11-06T12:00:00Z"},
             "cd" * 16: {"state": "failed", "message": "not running: importer.", "action": "account", "at": "2026-11-06T12:09:00Z"},
         })
-        page = self.call("GET", "/", app=self.make(setup_done=True)).body
+        page = self.call("GET", "/", app=self.make(code="")).body
         self.assertIn(b"did not finish: not running: importer.", page)
 
     # ------------------------------------------------------------ account ---
@@ -430,6 +446,172 @@ class ConsoleTest(unittest.TestCase):
         self.assertIn(b"stopped working on it", page)
         self.assertNotIn(b'http-equiv="refresh"', page)
 
+    # ------------------------------------------------- the steps in order ---
+    def bank_status(self, requests=None, **bank):
+        state = {"key": False, "certificate": "", "app_id": "",
+                 "redirect_urls": ["https://app.fx.example.com/eb-callback", "https://import.fx.example.com/eb-callback"]}
+        state.update(bank)
+        self.account_status(account=True, setup_done=False, bank=state, requests=requests or {},
+                            names=[{"role": "admin", "host": HOST}, {"role": "firefly", "host": "firefly.fx.example.com"},
+                                   {"role": "app", "host": "app.fx.example.com"},
+                                   {"role": "legal", "host": "legal.fx.example.com"}])
+
+    def request_of(self, resp) -> tuple[str, dict]:
+        self.assertEqual(resp.status, 303, resp.body[:300])
+        location = dict(resp.headers)["Location"]
+        rid = re.fullmatch(r"/requests/([0-9a-f]{32})", location).group(1)
+        return location, json.loads((self.inbox / f"{rid}.json").read_text())
+
+    def test_each_step_in_turn(self):
+        for status, where in ((self.write_status, "/server"), (self.account_status, "/account"),
+                              (self.bank_status, "/bank")):
+            status()
+            resp = self.call("POST", "/login", f"code={CODE}")
+            self.assertEqual(dict(resp.headers)["Location"], where)
+            cookie = dict(resp.headers)["Set-Cookie"].split(";")[0]
+            self.assertEqual(dict(self.call("GET", "/", cookie=cookie).headers)["Location"], where)
+
+    def test_after_the_account_the_server_step_stays(self):
+        self.bank_status()
+        cookie = self.sign_in()
+        page = self.call("GET", "/server", cookie=cookie).body.decode()
+        self.assertNotIn('<form method="post" action="/server"', page)
+        self.assertIn("scripts/firefly-pocket setup domain", page)
+        self.assertIn("Europe/Ljubljana", page)
+        self.assertIn('href="/bank"', page)
+        resp = self.call("POST", "/server", "domain=fx.example.com&email=you%40example.com&name=&timezone=Etc%2FUTC",
+                         cookie=cookie)
+        self.assertEqual(resp.status, 409)
+        self.assertEqual(self.requests(), [])
+
+    def test_after_the_account_its_page_says_done(self):
+        self.bank_status()
+        cookie = self.sign_in()
+        page = self.call("GET", "/account", cookie=cookie).body.decode()
+        self.assertIn("Done: you sign in at <code>https://firefly.fx.example.com</code> as you@example.com", page)
+        self.assertNotIn('type="password"', page)
+        self.assertIn("Next: Bank connection", page)
+        password = "correct+horse+battery+staple"
+        resp = self.call("POST", "/account", f"password={password}&password2={password}", cookie=cookie)
+        self.assertEqual(resp.status, 409)
+        self.assertEqual(self.requests(), [])
+
+    def test_bank_and_finish_wait_for_the_account(self):
+        self.account_status()
+        cookie = self.sign_in()
+        for path in ("/bank", "/finish"):
+            self.assertIn(b"Make the Firefly III account first", self.call("GET", path, cookie=cookie).body)
+        for path, body in (("/bank/key", ""), ("/bank", f"app_id={APP_ID}"), ("/finish", "")):
+            self.assertEqual(self.call("POST", path, body, cookie=cookie).status, 409, path)
+        self.assertEqual(self.requests(), [])
+
+    def test_bank_asks_the_server_for_a_key(self):
+        self.bank_status()
+        cookie = self.sign_in()
+        page = self.call("GET", "/bank", cookie=cookie).body.decode()
+        self.assertIn('action="/bank/key"', page)
+        self.assertIn("Make the key", page)
+        self.assertNotIn('name="app_id"', page)
+        self.assertIn("Skip it for now", page)
+        self.assertEqual(self.call("POST", "/bank", f"app_id={APP_ID}", cookie=cookie).status, 409)  # no key yet
+        location, request = self.request_of(self.call("POST", "/bank/key", "", cookie=cookie))
+        self.assertEqual({k: request[k] for k in ("action", "code")}, {"action": "bank_key", "code": "7K2MQ9TB0XH4PVRA"})
+        waiting = self.call("GET", location, cookie=cookie)
+        self.assertEqual(waiting.status, 202)
+        self.assertIn(b"Making the key", waiting.body)
+        self.assertIn(b"a few seconds", waiting.body)
+        # Made: straight back to the bank page, which has the certificate now.
+        rid = location.rsplit("/", 1)[1]
+        self.bank_status(key=True, certificate=CERT, requests={rid: {
+            "state": "applied", "action": "bank_key", "at": "2026-11-06T12:00:00Z", "message": "A new key."}})
+        done = self.call("GET", location, cookie=cookie)
+        self.assertEqual((done.status, dict(done.headers)["Location"]), (303, "/bank"))
+
+    def test_bank_hands_out_the_certificate(self):
+        self.bank_status(key=True, certificate=CERT)
+        cookie = self.sign_in()
+        page = self.call("GET", "/bank", cookie=cookie).body.decode()
+        for want in ('href="/bank/certificate" download', "-----BEGIN CERTIFICATE-----",
+                     "<code>https://app.fx.example.com/eb-callback</code>", "<code>https://import.fx.example.com/eb-callback</code>",
+                     "https://legal.fx.example.com/privacy", "https://legal.fx.example.com/terms", "production",
+                     'name="app_id" value=""', "Make a new key", "Skip it for now"):
+            self.assertIn(want, page)
+        resp = self.call("GET", "/bank/certificate", cookie=cookie)
+        self.assertEqual(resp.status, 200)
+        self.assertEqual(resp.body, CERT.encode())
+        self.assertEqual(resp.content_type, "application/x-pem-file")
+        self.assertIn("attachment", dict(resp.headers)["Content-Disposition"])
+        # Only signed in.
+        self.assertNotEqual(self.call("GET", "/bank/certificate").body, CERT.encode())
+
+    def test_bank_with_a_key_set_by_hand(self):
+        self.bank_status(key=True)
+        cookie = self.sign_in()
+        page = self.call("GET", "/bank", cookie=cookie).body.decode()
+        self.assertIn("set by hand", page)
+        self.assertNotIn("/bank/certificate", page)
+        self.assertIn('name="app_id"', page)
+        self.assertEqual(self.call("GET", "/bank/certificate", cookie=cookie).status, 404)
+
+    def test_bank_refuses_a_bad_id(self):
+        self.bank_status(key=True, certificate=CERT)
+        cookie = self.sign_in()
+        for value in ("", "not-an-id", APP_ID + "0", APP_ID[:-1] + "%0A"):
+            resp = self.call("POST", "/bank", f"app_id={value}", cookie=cookie)
+            self.assertEqual(resp.status, 400, value)
+            self.assertIn(b"An application ID, such as", resp.body)
+        resp = self.call("POST", "/bank", "app_id=%22%3E%3Cb%3E", cookie=cookie)
+        self.assertNotIn(b'"><b>', resp.body)
+        self.assertEqual(self.requests(), [])
+
+    def test_bank_hands_the_id_to_the_agent(self):
+        self.bank_status(key=True, certificate=CERT)
+        cookie = self.sign_in()
+        location, request = self.request_of(self.call("POST", "/bank", f"app_id=+{APP_ID}+", cookie=cookie))
+        self.assertEqual({k: request[k] for k in ("action", "code", "app_id")},
+                         {"action": "bank", "code": "7K2MQ9TB0XH4PVRA", "app_id": APP_ID})
+        self.assertIn(b"Checking with Enable Banking", self.call("GET", location, cookie=cookie).body)
+        rid = location.rsplit("/", 1)[1]
+        self.bank_status(key=True, certificate=CERT, requests={rid: {
+            "state": "refused", "action": "bank", "at": "2026-11-06T12:00:00Z",
+            "message": "Enable Banking refused a request signed with this server's key for this ID (HTTP 401)."}})
+        page = self.call("GET", location, cookie=cookie).body
+        self.assertIn(b"Not saved", page)
+        self.assertIn(b"HTTP 401", page)
+        self.assertIn(b'href="/bank"', page)
+        self.bank_status(key=True, certificate=CERT, app_id=APP_ID, requests={rid: {
+            "state": "applied", "action": "bank", "at": "2026-11-06T12:00:00Z", "message": "Saved: it works."}})
+        page = self.call("GET", location, cookie=cookie).body
+        self.assertIn(b"Saved: it works.", page)
+        self.assertIn(b'href="/finish">Next: Finish', page)
+        page = self.call("GET", "/bank", cookie=cookie).body.decode()
+        self.assertIn(f"This server uses the application <code>{APP_ID}</code>", page)
+        self.assertIn(f'value="{APP_ID}"', page)
+        self.assertIn('<li class="done"><a href="/bank">', self.call("GET", "/finish", cookie=cookie).body.decode())
+
+    def test_finish(self):
+        self.bank_status(key=True, certificate=CERT, app_id=APP_ID)
+        cookie = self.sign_in()
+        page = self.call("GET", "/finish", cookie=cookie).body.decode()
+        for want in (f"the application <code>{APP_ID}</code>", "fx.example.com", "https://firefly.fx.example.com",
+                     "<code>updates</code>", "nothing runs on a schedule", 'action="/finish"'):
+            self.assertIn(want, page)
+        location, request = self.request_of(self.call("POST", "/finish", "", cookie=cookie))
+        self.assertEqual({k: request[k] for k in ("action", "code")}, {"action": "finish", "code": "7K2MQ9TB0XH4PVRA"})
+        rid = location.rsplit("/", 1)[1]
+        self.bank_status(key=True, certificate=CERT, app_id=APP_ID, requests={rid: {
+            "state": "applied", "action": "finish", "at": "2026-11-06T12:00:00Z",
+            "message": "Setup is finished: the setup code works no more."}})
+        page = self.call("GET", location, cookie=cookie).body
+        self.assertIn(b"<h1>Setup is finished</h1>", page)
+        self.assertIn(b"open it again", page)
+
+    def test_finish_without_the_bank(self):
+        self.bank_status()
+        page = self.call("GET", "/finish", cookie=self.sign_in()).body.decode()
+        self.assertIn("Firefly Pocket links no bank until it is", page)
+        self.assertIn("scripts/firefly-pocket setup bank", page)
+
     def test_no_code(self):
         resp = self.call("GET", "/", app=self.make(code=""))
         self.assertEqual(resp.status, 503)
@@ -450,7 +632,7 @@ class ServerTest(unittest.TestCase):
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
-        app = Console(setup_done=False, code=CODE, inbox=Path(self.tmp.name), status_file=Path(self.tmp.name) / "s.json",
+        app = Console(code=CODE, inbox=Path(self.tmp.name), status_file=Path(self.tmp.name) / "s.json",
                       timezones=[], fail_delay=0, check_names=lambda names, v4, v6: [])
 
         class Handler(console.Handler):

@@ -29,19 +29,27 @@
 #      everything started, as the deploy starts it (up -d --no-build
 #      --remove-orphans), with the deploy's smoke test. So every new Firefly III
 #      image runs that script here before its bump merges: it uses Firefly III's
-#      internal classes. The gate opens, and the password is in no file
-#   4. scripts/firefly-pocket setup, as a new server runs it next, its answers
-#      piped in: Enter for what the console saved, every optional step skipped, the
-#      deploy agent off. It must ask no password and keep the console's tokens.
-#      That sets no hostname, so each is derived (*.localhost, which Caddy serves
-#      from its own CA); the secrets come from gen-secrets.sh, and compose/.env is
-#      written from the settings store
-#   5. the console says Firefly III has its account, and the code and the agent
-#      refuse to change anything
-#   6. the account step again, with no input: it must ask nothing and keep every token
-#   7. each token against Firefly III's API and through Firefly Pocket's, which
+#      internal classes. The gate opens, the password is in no file, and the
+#      console's session lasts: making the account does not start it again
+#   4. the console's bank step: the server makes a key and its certificate, which
+#      the console hands out, and keeps an application ID once Enable Banking takes
+#      a request signed with the key for it. A stand-in for Enable Banking's API
+#      answers, here on the runner: it checks each request's signature with that
+#      certificate, so a wrong ID is refused and the right one kept, and the
+#      importer starts again with it. Steps the console has done are refused now
+#   5. the console's Finish: the setup code goes, the console starts again without
+#      it, and the code signs in no more
+#   6. scripts/firefly-pocket setup, as a new server runs it next, its answers
+#      piped in: Enter for what the console saved, the bank's ID checked again,
+#      every optional step skipped, the deploy agent off. It must ask no password
+#      and keep the console's tokens. That sets no hostname, so each is derived
+#      (*.localhost, which Caddy serves from its own CA); the secrets come from
+#      gen-secrets.sh, and compose/.env is written from the settings store. The
+#      agent refuses a request with the old code
+#   7. the account step again, with no input: it must ask nothing and keep every token
+#   8. each token against Firefly III's API and through Firefly Pocket's, which
 #      calls Firefly III on the internal network
-#   8. the legal pages through Caddy: on their host, and under /legal/ on
+#   9. the legal pages through Caddy: on their host, and under /legal/ on
 #      Firefly Pocket's; and a bank consent's callback reaching the importer
 #      fork on Firefly Pocket's host and on the importer's
 
@@ -81,6 +89,7 @@ finish() {
     compose down -v --remove-orphans >/dev/null 2>&1 || true
     rm -rf "$ENV_FILE" "${STORE[@]}"
   fi
+  [ -z "${stub:-}" ] || kill "$stub" 2>/dev/null || true
   rm -rf "$jar"
   exit "$status"
 }
@@ -224,17 +233,155 @@ made=("$IMPORTER_FIREFLY_TOKEN" "$SUGGESTER_FIREFLY_TOKEN" "$NEXT_WARMUP_FIREFLY
 for token in "${made[@]}"; do
   token_check "$token"
 done
-# The console starts again, with the gate open.
+# The same session goes on to the bank step: the console did not start again.
+# Caddy did, with the gate open: give it a moment.
 for _ in $(seq 30); do
-  page="$(ask_console "$admin/" 2>/dev/null || true)"
-  [[ "$page" == *"Firefly III has its account"* ]] && break
+  went="$(ask_console -o /dev/null -w '%{http_code} %{redirect_url}' "$admin/" 2>/dev/null || true)"
+  [ "$went" = "303 $admin/bank" ] && break
   sleep 2
 done
-[[ "$page" == *"Firefly III has its account"* ]] || fail "the console does not say Firefly III has its account"
+[ "$went" = "303 $admin/bank" ] || fail "once the account is made, the console's session should go on to the bank step, but got \"$went\""
 page="$(docker run --rm --network "$DOCKER_NETWORK" "$CURL_IMAGE" -fsS -k -L --max-time 30 \
   --connect-to ::caddy:443 "https://$NEXT_HOSTNAME/")" || fail "no page at https://$NEXT_HOSTNAME/ once the account was made"
 [[ "$page" == *'type="module"'* ]] || fail "https://$NEXT_HOSTNAME/ is not the app once the account was made"
-echo "the account and a token per app are made, the gate is open, and the password is in no file"
+echo "the account and a token per app are made, the gate is open, the password is in no file, and the session lasts"
+
+echo "==> the console's bank step: a key made on the server, and an application ID checked with it"
+# Steps done are done, and nothing goes without the code.
+printf '{"action":"server","code":"%s","settings":{"DOMAIN":"localhost","SITE_OWNER":"ci@example.com","LEGAL_OWNER_NAME":"","TZ":"Etc/UTC"}}' \
+  "$code" > "$inbox/$(fake_id 1).json"
+printf '{"action":"account","code":"%s","password":"long enough to be taken, and the code"}' "$code" > "$inbox/$(fake_id 2).json"
+printf '{"action":"bank_key"}' > "$inbox/$(fake_id 3).json"
+scripts/firefly-pocket console apply
+for forged in 1 2 3; do
+  [ "$(state "$(fake_id $forged)")" = refused ] || fail "the request $(fake_id $forged): $(state "$(fake_id $forged)"), not refused"
+done
+scripts/firefly-pocket config has ENABLE_BANKING_PRIVATE_KEY && fail "a request without the code made a key"
+[[ "$(ask_console "$admin/bank")" == *'action="/bank/key"'* ]] || fail "the bank page offers no key"
+went="$(ask_console "${here[@]}" -o /dev/null -w '%{http_code} %{redirect_url}' --data '' "$admin/bank/key")"
+[[ "$went" =~ ^303\ ($admin/requests/[0-9a-f]{32})$ ]] || fail "making the key got \"$went\""
+request="${BASH_REMATCH[1]}"
+scripts/firefly-pocket console apply
+[ "$(state "${request##*/}")" = applied ] || fail "the key request: $(state "${request##*/}")"
+went="$(ask_console -o /dev/null -w '%{http_code} %{redirect_url}' "$request")"
+[ "$went" = "303 $admin/bank" ] || fail "a made key should lead back to the bank page, but got \"$went\""
+ask_console -f -o "$jar/application.crt" "$admin/bank/certificate" || fail "the console hands out no certificate"
+# shellcheck source=lib.sh
+source "$REPO_ROOT/scripts/lib.sh"
+# shellcheck source=bank.sh
+source "$REPO_ROOT/scripts/bank.sh"
+[ "$(openssl x509 -in "$jar/application.crt" -noout -pubkey)" = "$(eb_pem "$ENABLE_BANKING_PRIVATE_KEY" | openssl pkey -pubout)" ] \
+  || fail "the console's certificate is not that of the server's key"
+grep -rqF -- "$ENABLE_BANKING_PRIVATE_KEY" compose/console "$jar" && fail "the private key is in a file the console reaches"
+mapfile -t redirect_urls < <(eb_redirect_urls)
+page="$(ask_console "$admin/bank")"
+for want in "${redirect_urls[@]}" 'href="/bank/certificate"' 'name="app_id"'; do
+  [[ "$page" == *"$want"* ]] || fail "the bank page has no $want"
+done
+# Enable Banking, as far as the server can tell: GET /application, which
+# answers only a token signed with the key of this certificate for this ID.
+cat > "$jar/enable-banking.py" <<'STUB'
+# A stand-in for Enable Banking's GET /application: 200 for a token signed with
+# the key of this certificate for this application ID, else 401 as Enable Banking answers it.
+import base64, json, subprocess, sys, tempfile
+from http.server import BaseHTTPRequestHandler, HTTPServer
+
+cert, app_id, port_file = sys.argv[1], sys.argv[2], sys.argv[3]
+urls = sys.argv[4:]
+pub = tempfile.NamedTemporaryFile(suffix=".pem", delete=False)
+pub.write(subprocess.run(["openssl", "x509", "-in", cert, "-noout", "-pubkey"], check=True, capture_output=True).stdout)
+pub.close()
+
+def unb64(part):
+    return base64.urlsafe_b64decode(part + "=" * (-len(part) % 4))
+
+def verified(token):
+    try:
+        header, payload, signature = token.split(".")
+        head, claims = json.loads(unb64(header)), json.loads(unb64(payload))
+        with tempfile.NamedTemporaryFile() as sig:
+            sig.write(unb64(signature))
+            sig.flush()
+            ok = subprocess.run(["openssl", "dgst", "-sha256", "-verify", pub.name, "-signature", sig.name],
+                                input=f"{header}.{payload}".encode(), capture_output=True).returncode == 0
+        return ok and head.get("kid") == app_id and head.get("alg") == "RS256" \
+            and claims.get("aud") == "api.enablebanking.com" and claims.get("iss") == "enablebanking.com"
+    except Exception:
+        return False
+
+class Handler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        auth = self.headers.get("Authorization", "")
+        if self.path != "/application":
+            status, body = 404, {"code": 404, "message": "Not found"}
+        elif auth.startswith("Bearer ") and verified(auth[7:]):
+            status, body = 200, {"name": "Firefly Pocket CI", "environment": "PRODUCTION", "redirect_urls": urls, "services": ["AIS"]}
+        else:
+            status, body = 401, {"code": 401, "message": "Wrong signature"}
+        data = json.dumps(body).encode()
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def log_message(self, *args):
+        pass
+
+server = HTTPServer(("127.0.0.1", 0), Handler)
+with open(port_file, "w") as f:
+    f.write(str(server.server_address[1]))
+server.serve_forever()
+STUB
+app_id=3f9c2a71-5d0e-4b8a-9c21-7d4e5f6a8b90
+python3 "$jar/enable-banking.py" "$jar/application.crt" "$app_id" "$jar/eb-port" "${redirect_urls[@]}" &
+stub=$!
+for _ in $(seq 20); do [ -s "$jar/eb-port" ] && break; sleep 0.5; done
+[ -s "$jar/eb-port" ] || fail "the stand-in for Enable Banking did not start"
+EB_API="http://127.0.0.1:$(cat "$jar/eb-port")"
+export EB_API
+bank() {
+  ask_console "${here[@]}" -o /dev/null -w '%{http_code} %{redirect_url}' --data-urlencode "app_id=$1" "$admin/bank"
+}
+went="$(bank not-an-id)"
+[ "$went" = "400 " ] || fail "a malformed application ID got \"$went\""
+went="$(bank 1b4e28ba-2fa1-11d2-883f-0016d3cca427)"
+[[ "$went" =~ ^303\ ($admin/requests/[0-9a-f]{32})$ ]] || fail "an application ID got \"$went\""
+request="${BASH_REMATCH[1]}"
+scripts/firefly-pocket console apply
+[ "$(state "${request##*/}")" = refused ] || fail "another application's ID: $(state "${request##*/}"), not refused"
+[[ "$(ask_console "$request")" == *"Wrong signature"* ]] || fail "the console does not say why the ID was refused"
+scripts/firefly-pocket config has ENABLE_BANKING_APP_ID && fail "an ID Enable Banking refused was kept"
+went="$(bank "$app_id")"
+[[ "$went" =~ ^303\ ($admin/requests/[0-9a-f]{32})$ ]] || fail "the application's ID got \"$went\""
+request="${BASH_REMATCH[1]}"
+scripts/firefly-pocket console apply
+[ "$(state "${request##*/}")" = applied ] || fail "the application's ID: $(state "${request##*/}"): $(jq -r --arg id "${request##*/}" '.requests[$id].message' compose/console/status/status.json)"
+[ "$(scripts/firefly-pocket config get ENABLE_BANKING_APP_ID)" = "$app_id" ] || fail "the application's ID was not kept"
+# What compose gave the importer: it is recreated with the ID.
+given="$(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$(compose ps -q importer)" | grep '^ENABLE_BANKING_APP_ID=' || true)"
+[ "$given" = "ENABLE_BANKING_APP_ID=$app_id" ] || fail "the importer did not start again with the ID: it has \"$given\""
+page="$(ask_console "$request")"
+[[ "$page" == *"Firefly Pocket CI"*"Next: Finish"* ]] || fail "the console does not say the ID was kept"
+echo "the key stays on the server, its certificate is handed out, and only the right ID is kept"
+
+echo "==> the console's Finish: the setup code goes"
+went="$(ask_console "${here[@]}" -o /dev/null -w '%{http_code} %{redirect_url}' --data '' "$admin/finish")"
+[[ "$went" =~ ^303\ ($admin/requests/[0-9a-f]{32})$ ]] || fail "Finish got \"$went\""
+request="${BASH_REMATCH[1]}"
+scripts/firefly-pocket console apply
+[ "$(state "${request##*/}")" = applied ] || fail "Finish: $(state "${request##*/}")"
+scripts/firefly-pocket config has SETUP_CODE && fail "Finish left the setup code"
+# The console starts again, without the code.
+for _ in $(seq 30); do
+  page="$(ask_console "$admin/" 2>/dev/null || true)"
+  [[ "$page" == *"Setup is finished"* ]] && break
+  sleep 2
+done
+[[ "$page" == *"Setup is finished"* ]] || fail "the console does not say setup is finished"
+headers="$(ask_console "${here[@]}" -o /dev/null -D - --data-urlencode "code=$SETUP_CODE" "$admin/login")"
+grep -qi '^set-cookie:' <<<"$headers" && fail "the setup code still signs in"
+echo "setup is finished, and the code signs in no more"
 
 # ----------------------------------------------------------- over SSH ---
 answers=(
@@ -243,7 +390,7 @@ answers=(
   ''               # Name: CI Operator, saved in the console
   ''               # Timezone: Europe/Ljubljana, saved in the console
                    # Firefly III account: the console made it, so no password is asked
-  n                # bank import: not now
+  ''               # bank import: the console's ID, checked again with the stand-in
   ''               # AI key: none
   none             # ntfy: none
   ''               # healthchecks.io: none
@@ -260,17 +407,16 @@ fi
 # shellcheck source=lib.sh
 source "$REPO_ROOT/scripts/lib.sh"
 
-echo "==> setup is finished: the gate is open, and the console changes nothing"
+echo "==> setup is finished: the console changes nothing"
 page="$(ask_console "$admin/")"
-[[ "$page" == *"Firefly III has its account"* ]] || fail "the console does not say Firefly III has its account"
-headers="$(ask_console "${here[@]}" -o /dev/null -D - --data-urlencode "code=$SETUP_CODE" "$admin/login")"
-grep -qi '^set-cookie:' <<<"$headers" && fail "the setup code still signs in"
+[[ "$page" == *"Setup is finished"* ]] || fail "the console does not say setup is finished"
+[ "$(scripts/firefly-pocket config get ENABLE_BANKING_APP_ID)" = "$app_id" ] || fail "Enter did not keep the application's ID"
 printf '{"action":"server","code":"%s","settings":{"DOMAIN":"localhost","SITE_OWNER":"ci@example.com","LEGAL_OWNER_NAME":"","TZ":"Etc/UTC"}}' \
   "$code" > "$inbox/$(fake_id d).json"
 scripts/firefly-pocket console apply
 [ "$(state "$(fake_id d)")" = refused ] || fail "the agent applied a request after setup: $(state "$(fake_id d)")"
 [ "$(scripts/firefly-pocket config get TZ)" = Europe/Ljubljana ] || fail "the timezone changed after setup"
-echo "the code no longer signs in, and the agent refused a request"
+echo "the agent refused a request with the old code"
 tokens=("$IMPORTER_FIREFLY_TOKEN" "$SUGGESTER_FIREFLY_TOKEN" "$NEXT_WARMUP_FIREFLY_TOKEN")
 if [ "$(printf '%s\n' "${tokens[@]}" | sort -u | wc -l)" -ne 3 ]; then
   echo "FATAL: the three apps should have a token each" >&2
