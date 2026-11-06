@@ -69,6 +69,13 @@ source "$REPO_ROOT/scripts/host.sh"
 # shellcheck source=bank.sh
 source "$REPO_ROOT/scripts/bank.sh"
 
+# Compose takes a variable from its environment over compose/.env, and lib.sh
+# exports every value .env has. So nothing that ran this (a shell that sourced
+# lib.sh, the boot test) chooses what a service gets: compose/.env, as the
+# store writes it, does. A step that sources lib.sh sources it again after it
+# writes .env, before compose.
+while IFS= read -r key; do unset "$key"; done < <(jq -r 'keys[]' "$REPO_ROOT/scripts/settings.json")
+
 die() { echo "FATAL: $*" >&2; exit 1; }
 # refuse: as die, for a request that changed nothing.
 refuse() { echo "FATAL: $*" >&2; exit 2; }
@@ -427,6 +434,8 @@ cmd_bank_key() {
   trap "rm -rf '$dir'" EXIT
   make_eb_key "$dir" || refuse "$EB_PROBLEM"
   "$FP" config render >/dev/null
+  # shellcheck source=lib.sh
+  source "$REPO_ROOT/scripts/lib.sh"
   # The importer has the old key: it starts again with the new one, and no ID.
   compose up -d --no-build importer \
     || die "The key is made, but the importer did not start again with it; the journal has why (journalctl -u firefly-pocket-console)"
@@ -443,6 +452,8 @@ cmd_bank() {
   echo "Enable Banking accepts a request signed with this server's key for $id: $(eb_about)"
   "$FP" config set --no-render ENABLE_BANKING_APP_ID - <<<"$id" >/dev/null
   "$FP" config render >/dev/null
+  # shellcheck source=lib.sh
+  source "$REPO_ROOT/scripts/lib.sh"
   compose up -d --no-build importer \
     || die "The ID is saved, but the importer did not start again with it; the journal has why (journalctl -u firefly-pocket-console)"
   notes="$(eb_notes | paste -sd' ' -)"
