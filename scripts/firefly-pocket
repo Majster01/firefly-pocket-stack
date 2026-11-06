@@ -2,15 +2,18 @@
 #
 # The server's command line.
 #
-#     scripts/firefly-pocket config ...   the settings (scripts/config.sh says how)
+#     scripts/firefly-pocket setup [<step>]   the setup wizard (scripts/setup.sh says how)
+#     scripts/firefly-pocket config ...       the settings (scripts/config.sh says how)
 
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 case "${1:-}" in
+  setup) shift; exec "$here/setup.sh" "$@" ;;
   config) shift; exec "$here/config.sh" "$@" ;;
   *)
-    echo "usage: scripts/firefly-pocket config <list|get|set|unset|has|render|import> ..." >&2
+    echo "usage: scripts/firefly-pocket setup [<step>]" >&2
+    echo "       scripts/firefly-pocket config <list|get|set|unset|has|check|render|import> ..." >&2
     exit 2
     ;;
 esac

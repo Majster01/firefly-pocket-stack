@@ -12,17 +12,20 @@
 # exists: it makes its own, and its containers, volumes and networks use the
 # server's names.
 #
-#   1. the settings as a new server makes them (README "Configure"): DOMAIN=localhost,
-#      the two emails and nothing else set by hand, every secret from gen-secrets.sh,
-#      and compose/.env written from that store. No hostname of its own, so every
-#      host is derived (*.localhost, which Caddy serves from its own CA)
-#   2. Postgres and Firefly III, until Firefly III answers
-#   3. the first user and a Personal Access Token, as stage 2 needs, without
-#      the web UI; the token goes into IMPORTER_FIREFLY_TOKEN and
-#      SUGGESTER_FIREFLY_TOKEN, with config set
-#   4. everything, as the deploy starts it: up -d --no-build --remove-orphans
-#   5. the deploy's smoke test, and the token against Firefly III's API and
-#      through Firefly Pocket's, which calls Firefly III on the internal network
+#   1. scripts/firefly-pocket setup, as a new server runs it (README "Set it up"),
+#      its answers piped in: DOMAIN=localhost, an email and a password, every
+#      optional step skipped, the deploy agent off. That sets no hostname, so each
+#      is derived (*.localhost, which Caddy serves from its own CA); the secrets come
+#      from gen-secrets.sh, and compose/.env is written from the settings store
+#   2. its account step: Postgres and Firefly III only, then the account and one
+#      token per app, made inside Firefly III by scripts/firefly-bootstrap.php, and
+#      /register closed. So every new Firefly III image runs that script here
+#      before its bump merges: it uses Firefly III's internal classes
+#   3. its start step: everything, as the deploy starts it (up -d --no-build
+#      --remove-orphans), and the deploy's smoke test
+#   4. the account step again, with no input: it must ask nothing and keep every token
+#   5. each token against Firefly III's API and through Firefly Pocket's, which
+#      calls Firefly III on the internal network
 #   6. the legal pages through Caddy: on their host, and under /legal/ on
 #      Firefly Pocket's; and a bank consent's callback reaching the importer
 #      fork on Firefly Pocket's host and on the importer's
@@ -67,14 +70,28 @@ finish() {
 }
 trap finish EXIT
 
-# setting KEY VALUE: as a person sets one, the value through stdin.
-setting() { scripts/firefly-pocket config set "$1" - <<<"$2" >/dev/null; }
-
-echo "==> the settings, as a new server makes them, with throwaway values"
-setting DOMAIN localhost
-setting ACME_EMAIL ci@example.com
-setting SITE_OWNER ci@example.com
-scripts/gen-secrets.sh >/dev/null
+# A bounded read, as gen-secrets.sh makes its secrets.
+password="$(LC_ALL=C tr -dc 'A-Za-z0-9' < <(LC_ALL=C head -c 512 /dev/urandom))"
+password="${password:0:24}"
+# One line per question, in the wizard's order. A question it did not ask
+# before shifts every answer after it, and the run fails.
+answers=(
+  localhost        # Domain
+  ci@example.com   # Email
+  ''               # Name, for the legal pages: none
+  ''               # Timezone: this machine's
+  ''               # the importer's password, shown once: go on
+  "$password"      # Firefly III account: password
+  "$password"      # once more
+  n                # bank import: not now
+  ''               # AI key: none
+  none             # ntfy: none
+  ''               # healthchecks.io: none
+  ''               # restic repository: none
+  n                # deploy agent: off, never on a runner
+)
+echo "==> scripts/firefly-pocket setup, as a new server runs it, with throwaway answers"
+printf '%s\n' "${answers[@]}" | scripts/firefly-pocket setup
 if grep -E '^[A-Z_]+_HOSTNAME=' "$ENV_FILE"; then
   echo "FATAL: a new server should need only DOMAIN, but compose/.env sets the hostnames above" >&2
   exit 1
@@ -83,53 +100,28 @@ fi
 # lib.sh reads compose/.env, so it comes after it.
 # shellcheck source=lib.sh
 source "$REPO_ROOT/scripts/lib.sh"
-
-echo "==> Postgres and Firefly III"
-compose up -d --no-build db app
-for _ in $(seq 60); do
-  internal_http http://app:8080/health 10 >/dev/null 2>&1 && break
-  sleep 5
-done
-internal_http http://app:8080/health 10 >/dev/null || { echo "Firefly III did not answer within five minutes"; exit 1; }
-
-echo "==> the first user and a Personal Access Token"
-# Firefly's own system:create-first-user, which also fires its new-user event.
-# It refuses outside the testing environment, so the check is flipped for this
-# one process only. Its log goes to stdout too: the token is the last line.
-token="$(compose exec -T app php <<'PHP' | tail -n 1
-<?php
-require 'vendor/autoload.php';
-$app = require 'bootstrap/app.php';
-$app->make(Illuminate\Contracts\Console\Kernel::class)->bootstrap();
-use Illuminate\Support\Facades\Artisan;
-config(['app.env' => 'testing']);
-foreach ([
-    ['system:create-first-user', ['email' => 'ci@example.com']],
-    ['passport:client', ['--personal' => true, '--name' => 'boot-test', '--no-interaction' => true]],
-] as [$command, $arguments]) {
-    if (Artisan::call($command, $arguments) !== 0) {
-        fwrite(STDERR, "$command failed:\n" . Artisan::output());
-        exit(1);
-    }
-}
-echo "\n", FireflyIII\User::firstOrFail()->createToken('boot-test')->accessToken, "\n";
-PHP
-)"
-if ! [[ "$token" =~ ^[A-Za-z0-9._-]{100,}$ ]]; then
-  echo "no token from Firefly III; its last line was: ${token:0:200}"
+tokens=("$IMPORTER_FIREFLY_TOKEN" "$SUGGESTER_FIREFLY_TOKEN" "$NEXT_WARMUP_FIREFLY_TOKEN")
+if [ "$(printf '%s\n' "${tokens[@]}" | sort -u | wc -l)" -ne 3 ]; then
+  echo "FATAL: the three apps should have a token each" >&2
   exit 1
 fi
-setting IMPORTER_FIREFLY_TOKEN "$token"
-setting SUGGESTER_FIREFLY_TOKEN "$token"
 
-echo "==> everything, as the deploy starts it"
-compose up -d --no-build --remove-orphans
+echo "==> setup account again, with nothing to answer: it keeps every token"
+scripts/firefly-pocket setup account </dev/null
+# shellcheck source=lib.sh
+source "$REPO_ROOT/scripts/lib.sh"
+if [ "$IMPORTER_FIREFLY_TOKEN $SUGGESTER_FIREFLY_TOKEN $NEXT_WARMUP_FIREFLY_TOKEN" != "${tokens[*]}" ]; then
+  echo "FATAL: the second run made new tokens" >&2
+  exit 1
+fi
 
 echo "==> the deploy's smoke test"
 smoke_test
 
-echo "==> the token against Firefly III's API, and through Firefly Pocket's"
-token_check "$token"
+echo "==> each app's token against Firefly III's API, and through Firefly Pocket's"
+for token in "${tokens[@]}"; do
+  token_check "$token"
+done
 
 # By name through Caddy, as a browser asks: its own CA for *.localhost (-k),
 # from this network. The legal pages render on their host and under /legal/
