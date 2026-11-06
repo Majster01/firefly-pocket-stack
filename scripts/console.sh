@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# The server's half of the Firefly Pocket Console (Setup UI steps 4 to 6).
+# The server's half of the Firefly Pocket Console (Setup UI steps 4 to 7).
 #
 #     scripts/firefly-pocket console apply     apply what the console saved, then write its status
 #     scripts/firefly-pocket console status    write its status only
@@ -30,7 +30,7 @@
 #                        $SITE_OWNER and one token per app made inside Firefly III, then
 #                        every service started, which opens the gate. Minutes; the request
 #                        says how far it got as it goes
-#                        and after it, three:
+#                        and after it, these:
 #       {"action": "bank_key", "code": "..."}
 #                        the wizard's bank step, its first half (bank.sh): a new key for an
 #                        Enable Banking application, kept in the store, and its certificate,
@@ -39,13 +39,27 @@
 #       {"action": "bank", "code": "...", "app_id": "..."}
 #                        its second half: kept, and the importer started again with it, once
 #                        Enable Banking takes a request signed with the key for that ID
+#       {"action": "suggestions", "code": "...", "provider": "anthropic" or "gemini",
+#        "key": "...", "model": "..."}
+#                        the wizard's suggestions step (suggestions.sh): the key and the
+#                        model kept once the provider has that model for the key
+#       {"action": "ntfy", "code": "...", "url": "..."}
+#                        the wizard's alerts step, its ntfy half (alerts.sh): the topic kept
+#                        once ntfy takes a test alert at it; an empty URL stops ntfy
+#       {"action": "ntfy_test", "code": "..."}
+#                        a test alert to the topic kept
+#       {"action": "healthchecks", "code": "...", "key": "..."}
+#                        its other half: healthchecks.io's two checks made with that API
+#                        key, which is not kept, and their ping URLs kept
 #       {"action": "finish", "code": "..."}
 #                        the end of setup: the code is removed, and the console starts
 #                        again without it
 #   status/status.json   those settings, the five names, this server's addresses and
 #                        timezone, whether Firefly III has its account and whether setup is
 #                        finished, the bank step's certificate, application ID and redirect
-#                        URLs, and what became of the last 20 requests. No secret.
+#                        URLs, the last four characters of each key and topic kept, the
+#                        model, whether the checks are made, and what became of the last 20
+#                        requests. No secret.
 #
 # apply runs under the lock the deploy and the cron jobs take, one request after
 # another in the order the console wrote them.
@@ -68,6 +82,10 @@ declare -A LABEL=([DOMAIN]="the domain" [SITE_OWNER]="your email" [LEGAL_OWNER_N
 source "$REPO_ROOT/scripts/host.sh"
 # shellcheck source=bank.sh
 source "$REPO_ROOT/scripts/bank.sh"
+# shellcheck source=suggestions.sh
+source "$REPO_ROOT/scripts/suggestions.sh"
+# shellcheck source=alerts.sh
+source "$REPO_ROOT/scripts/alerts.sh"
 
 # Compose takes a variable from its environment over compose/.env, and lib.sh
 # exports every value .env has. So nothing that ran this (a shell that sourced
@@ -159,6 +177,25 @@ bank_json() {
     '{key: $key, certificate: $certificate, app_id: $app_id}'
 }
 
+# last4 <KEY>: "…" and a secret's last four characters, as config get shows
+# it; empty when it is not set.
+last4() {
+  local value
+  value="$(env_value "$1")"
+  [ -z "$value" ] || printf '…%s' "${value: -4}"
+}
+
+# The suggestions and alerts steps': what is kept, a secret only by its last four.
+extras_json() {
+  local checks=false
+  [ -z "$(env_value HEALTHCHECK_NIGHTLY_URL)" ] || [ -z "$(env_value HEALTHCHECK_BACKUP_URL)" ] || checks=true
+  jq -nc --arg anthropic "$(last4 ANTHROPIC_API_KEY)" --arg gemini "$(last4 GEMINI_API_KEY)" \
+    --arg model "$(stored SUGGESTER_MODEL)" --arg default "$SUGGESTER_DEFAULT_MODEL" \
+    --arg ntfy "$(last4 NTFY_URL)" --argjson checks "$checks" '
+    { suggestions: {anthropic: $anthropic, gemini: $gemini, model: (if $model == "" then $default else $model end)},
+      alerts: {ntfy: $ntfy, healthchecks: $checks} }'
+}
+
 write_status() {
   local old='{}' tmp account=false finished=false
   console_dirs
@@ -173,12 +210,13 @@ write_status() {
         --arg domain "$(stored DOMAIN)" --arg owner "$(stored SITE_OWNER)" \
         --arg name "$(stored LEGAL_OWNER_NAME)" --arg tz "$(stored TZ)" --arg admin "$(stored ADMIN_HOSTNAME)" \
         --arg host_tz "$(host_timezone)" --arg v4 "$(my_address 4)" --arg v6 "$(my_address 6)" \
-        --argjson derived "$(names_json)" --argjson bank "$(bank_json)" \
+        --argjson derived "$(names_json)" --argjson bank "$(bank_json)" --argjson extras "$(extras_json)" \
         --argjson old "$old" --argjson new "$RESULTS" '
     { written: $written, account: $account, setup_done: $finished,
       settings: {DOMAIN: $domain, SITE_OWNER: $owner, LEGAL_OWNER_NAME: $name, TZ: $tz, ADMIN_HOSTNAME: $admin},
       host_timezone: $host_tz, addresses: {v4: $v4, v6: $v6}, names: $derived.names,
       bank: ($bank + {redirect_urls: $derived.redirect_urls}),
+      suggestions: $extras.suggestions, alerts: $extras.alerts,
       requests: ($old + $new | to_entries | sort_by(.value.at) | .[-20:] | from_entries) }' > "$tmp"
   chmod 644 "$tmp"
   mv -f "$tmp" "$STATUS"
@@ -205,7 +243,7 @@ apply_one() {
   fi
   ACTION="$(jq -r 'if type == "object" and (.action | type) == "string" then .action else "" end' <"$file" 2>/dev/null || true)"
   case "$ACTION" in
-    server | account | bank_key | bank | finish) ;;
+    server | account | bank_key | bank | suggestions | ntfy | ntfy_test | healthchecks | finish) ;;
     *)
       ACTION=""
       result "$id" refused "Not a request this version of the server knows."
@@ -372,6 +410,129 @@ bank_result() {
   else
     result "$1" failed "${MESSAGE:-It stopped; journalctl -u firefly-pocket-console says where.}"
   fi
+}
+
+# strings_of <file> <field>: a request's string field, empty when it is no
+# string or has a control character. Only the shape the console writes.
+string_of() {
+  jq -r --arg f "$2" '.[$f] | strings | select(explode | all(. >= 32 and . != 127))' <"$1" 2>/dev/null || true
+}
+
+# A secret into the store, on stdin; config set checks it again.
+keep() { "$FP" config set --no-render "$1" - <<<"$2" >/dev/null 2>&1; }
+
+# apply_suggestions, apply_ntfy, apply_ntfy_test, apply_healthchecks <id> <file>:
+# 1, always. Nothing to start again: the suggester and the jobs that alert run
+# from cron, and read compose/.env when they do.
+apply_suggestions() {
+  local id="$1" file="$2" provider key model out
+  provider="$(string_of "$file" provider)"
+  key="$(string_of "$file" key)"
+  model="$(string_of "$file" model)"
+  case "$provider" in
+    anthropic) model="${model:-$SUGGESTER_DEFAULT_MODEL}"; [[ "$model" == claude-* ]] || provider="" ;;
+    gemini) [[ "$model" == gemini-* ]] || provider="" ;;
+    *) provider="" ;;
+  esac
+  if [ -z "$provider" ] || [ -z "$key" ]; then
+    result "$id" refused "Not a request this version of the server knows."
+    return 1
+  fi
+  if ! out="$("$FP" config check ANTHROPIC_API_KEY - 2>&1 <<<"$key")"; then
+    result "$id" refused "Not an API key: ${out#*: }."
+    return 1
+  fi
+  if ! out="$("$FP" config check SUGGESTER_MODEL - 2>&1 <<<"$model")"; then
+    result "$id" refused "Not a model name: ${out#*: }."
+    return 1
+  fi
+  result "$id" running "Asking $provider for $model with this key."
+  write_status
+  if ! model_check "$provider" "$key" "$model"; then
+    result "$id" refused "$MODEL_PROBLEM"
+    return 1
+  fi
+  out=""
+  if ! { keep "${provider^^}_API_KEY" "$key" && "$FP" config set --no-render SUGGESTER_MODEL - <<<"$model" >/dev/null 2>&1 \
+         && out="$("$FP" config render 2>&1)"; }; then
+    result "$id" failed "The key passed its check, but the settings store did not take it: ${out:-config set failed}"
+    return 1
+  fi
+  key=""
+  result "$id" applied "Saved: $provider has $model for this key. The suggester uses it from its next run, at night."
+  return 1
+}
+
+apply_ntfy() {
+  local id="$1" file="$2" url out
+  url="$(string_of "$file" url)"
+  if [ -z "$url" ]; then
+    if jq -e '.url == ""' <"$file" >/dev/null 2>&1; then
+      out="$("$FP" config unset NTFY_URL 2>&1)" || { result "$id" failed "${out#FATAL: }"; return 1; }
+      result "$id" applied "No ntfy: alerts reach only the Firefly Pocket app."
+    else
+      result "$id" refused "Not a request this version of the server knows."
+    fi
+    return 1
+  fi
+  if ! out="$("$FP" config check NTFY_URL - 2>&1 <<<"$url")"; then
+    result "$id" refused "Not a topic URL: ${out#*: }."
+    return 1
+  fi
+  result "$id" running "Sending a test alert to the topic."
+  write_status
+  if ! ntfy_send "$url" "Firefly Pocket: test" "Alerts from $(hostname) arrive here."; then
+    result "$id" refused "ntfy did not take a test alert at that URL, so it is not kept. Is it right, and is ntfy.sh up?"
+    return 1
+  fi
+  out=""
+  if ! { keep NTFY_URL "$url" && out="$("$FP" config render 2>&1)"; }; then
+    result "$id" failed "ntfy took the test, but the settings store did not take the URL: ${out:-config set failed}"
+    return 1
+  fi
+  result "$id" applied "Saved, and a test alert sent: it should be on your phone now. If it is not, subscribe to the topic in the ntfy app first, then send another test."
+  return 1
+}
+
+apply_ntfy_test() {
+  local id="$1" url
+  url="$(env_value NTFY_URL)"
+  if [ -z "$url" ]; then
+    result "$id" refused "No ntfy topic is kept yet."
+  elif ntfy_send "$url" "Firefly Pocket: test" "Alerts from $(hostname) arrive here."; then
+    result "$id" applied "A test alert went out: it should be on your phone now."
+  else
+    result "$id" failed "ntfy did not take the test alert. Is ntfy.sh up?"
+  fi
+  return 1
+}
+
+apply_healthchecks() {
+  local id="$1" file="$2" key out url tz
+  key="$(string_of "$file" key)"
+  if ! [[ "$key" =~ ^[A-Za-z0-9._-]{16,}$ ]]; then
+    result "$id" refused "Not an API key: healthchecks.io's are 32 letters and digits, under the project's Settings, API Access."
+    return 1
+  fi
+  tz="$(stored TZ)"
+  result "$id" running "Making the two checks on healthchecks.io."
+  write_status
+  if ! TZ="${tz:-Etc/UTC}" hc_setup "$key"; then
+    result "$id" refused "$HC_PROBLEM"
+    return 1
+  fi
+  key=""
+  out=""
+  if ! { keep HEALTHCHECK_NIGHTLY_URL "$HC_NIGHTLY" && keep HEALTHCHECK_BACKUP_URL "$HC_BACKUP" \
+         && out="$("$FP" config render 2>&1)"; }; then
+    result "$id" failed "healthchecks.io made the checks, but the settings store did not take their ping URLs: ${out:-config set failed}"
+    return 1
+  fi
+  for url in "$HC_NIGHTLY" "$HC_BACKUP"; do
+    hc_ping "$url" "set up by the Firefly Pocket Console" || true
+  done
+  result "$id" applied "Both checks are made on healthchecks.io, the nightly import's and the backup's, with their schedules in ${tz:-Etc/UTC}. It mails you when either does not report in on time. The API key is not kept."
+  return 1
 }
 
 # apply_finish <id> <file>: 1, always: it starts the console again itself.

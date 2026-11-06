@@ -33,23 +33,28 @@
 #      console's session lasts: making the account does not start it again
 #   4. the console's bank step: the server makes a key and its certificate, which
 #      the console hands out, and keeps an application ID once Enable Banking takes
-#      a request signed with the key for it. A stand-in for Enable Banking's API
-#      answers, here on the runner: it checks each request's signature with that
-#      certificate, so a wrong ID is refused and the right one kept, and the
-#      importer starts again with it. Steps the console has done are refused now
-#   5. the console's Finish: the setup code goes, the console starts again without
+#      a request signed with the key for it. Stand-ins for the services setup
+#      talks to answer here on the runner; Enable Banking's checks each request's
+#      signature with that certificate, so a wrong ID is refused and the right one
+#      kept, and the importer starts again with it. Steps the console has done are
+#      refused now
+#   5. the console's suggestions and alerts steps: a wrong AI key refused and the
+#      right one kept, an ntfy topic kept once a test alert reaches it, and
+#      healthchecks.io's two checks made, in the server's timezone, with an API key
+#      that is not kept. No key is in a file the console reaches
+#   6. the console's Finish: the setup code goes, the console starts again without
 #      it, and the code signs in no more
-#   6. scripts/firefly-pocket setup, as a new server runs it next, its answers
-#      piped in: Enter for what the console saved, the bank's ID checked again,
-#      every optional step skipped, the deploy agent off. It must ask no password
+#   7. scripts/firefly-pocket setup, as a new server runs it next, its answers
+#      piped in: Enter for what the console saved, the bank's ID and the AI key
+#      checked again, backups skipped, the deploy agent off. It must ask no password
 #      and keep the console's tokens. That sets no hostname, so each is derived
 #      (*.localhost, which Caddy serves from its own CA); the secrets come from
 #      gen-secrets.sh, and compose/.env is written from the settings store. The
 #      agent refuses a request with the old code
-#   7. the account step again, with no input: it must ask nothing and keep every token
-#   8. each token against Firefly III's API and through Firefly Pocket's, which
+#   8. the account step again, with no input: it must ask nothing and keep every token
+#   9. each token against Firefly III's API and through Firefly Pocket's, which
 #      calls Firefly III on the internal network
-#   9. the legal pages through Caddy: on their host, and under /legal/ on
+#  10. the legal pages through Caddy: on their host, and under /legal/ on
 #      Firefly Pocket's; and a bank consent's callback reaching the importer
 #      fork on Firefly Pocket's host and on the importer's
 
@@ -278,68 +283,114 @@ page="$(ask_console "$admin/bank")"
 for want in "${redirect_urls[@]}" 'href="/bank/certificate"' 'name="app_id"'; do
   [[ "$page" == *"$want"* ]] || fail "the bank page has no $want"
 done
-# Enable Banking, as far as the server can tell: GET /application, which
-# answers only a token signed with the key of this certificate for this ID.
-cat > "$jar/enable-banking.py" <<'STUB'
-# A stand-in for Enable Banking's GET /application: 200 for a token signed with
-# the key of this certificate for this application ID, else 401 as Enable Banking answers it.
+# The services setup talks to, as far as the server can tell. Their keys are
+# made up; the server is told where they are in the environment, as only a test
+# can tell it.
+app_id=3f9c2a71-5d0e-4b8a-9c21-7d4e5f6a8b90
+random="$(LC_ALL=C tr -dc 'a-z0-9' < <(LC_ALL=C head -c 1024 /dev/urandom))"
+anthropic_key="sk-ant-api03-boot-test-${random:0:32}"
+healthchecks_key="${random:32:32}"
+mkdir "$jar/outside"
+jq -n --arg cert "$jar/application.crt" --arg app_id "$app_id" --arg anthropic "$anthropic_key" \
+  --arg healthchecks "$healthchecks_key" --args '{cert: $cert, app_id: $app_id, redirect_urls: $ARGS.positional,
+    anthropic_key: $anthropic, healthchecks_key: $healthchecks}' "${redirect_urls[@]}" > "$jar/outside/config.json"
+cat > "$jar/outside/outside.py" <<'STUB'
+# Stand-ins for the services setup talks to, on one port, as far as the server
+# can tell them apart: Enable Banking's GET /application (a token signed with
+# the key of the certificate the console handed out, for this application ID),
+# Anthropic's GET /v1/models/<model> (this key), healthchecks.io's
+# POST /api/v3/checks/ (this API key) and its pings, and an ntfy topic under
+# /ntfy/. Everything sent to it is listed at GET /log, for the test to read.
 import base64, json, subprocess, sys, tempfile
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
-cert, app_id, port_file = sys.argv[1], sys.argv[2], sys.argv[3]
-urls = sys.argv[4:]
+config = json.load(open(sys.argv[1]))
+port_file = sys.argv[2]
 pub = tempfile.NamedTemporaryFile(suffix=".pem", delete=False)
-pub.write(subprocess.run(["openssl", "x509", "-in", cert, "-noout", "-pubkey"], check=True, capture_output=True).stdout)
+pub.write(subprocess.run(["openssl", "x509", "-in", config["cert"], "-noout", "-pubkey"],
+                         check=True, capture_output=True).stdout)
 pub.close()
+log = []
+
 
 def unb64(part):
     return base64.urlsafe_b64decode(part + "=" * (-len(part) % 4))
 
-def verified(token):
+
+def signed(token):
     try:
         header, payload, signature = token.split(".")
         head, claims = json.loads(unb64(header)), json.loads(unb64(payload))
         with tempfile.NamedTemporaryFile() as sig:
             sig.write(unb64(signature))
             sig.flush()
-            ok = subprocess.run(["openssl", "dgst", "-sha256", "-verify", pub.name, "-signature", sig.name],
-                                input=f"{header}.{payload}".encode(), capture_output=True).returncode == 0
-        return ok and head.get("kid") == app_id and head.get("alg") == "RS256" \
-            and claims.get("aud") == "api.enablebanking.com" and claims.get("iss") == "enablebanking.com"
+            verified = subprocess.run(["openssl", "dgst", "-sha256", "-verify", pub.name, "-signature", sig.name],
+                                      input=f"{header}.{payload}".encode(), capture_output=True).returncode == 0
+        return verified and head.get("alg") == "RS256" and head.get("kid") == config["app_id"] \
+            and claims.get("iss") == "enablebanking.com" and claims.get("aud") == "api.enablebanking.com"
     except Exception:
         return False
 
+
 class Handler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        auth = self.headers.get("Authorization", "")
-        if self.path != "/application":
-            status, body = 404, {"code": 404, "message": "Not found"}
-        elif auth.startswith("Bearer ") and verified(auth[7:]):
-            status, body = 200, {"name": "Firefly Pocket CI", "environment": "PRODUCTION", "redirect_urls": urls, "services": ["AIS"]}
-        else:
-            status, body = 401, {"code": 401, "message": "Wrong signature"}
-        data = json.dumps(body).encode()
+    def answer(self, status, body):
+        data = (json.dumps(body) if not isinstance(body, str) else body).encode()
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
         self.wfile.write(data)
 
+    def do_GET(self):
+        auth = self.headers.get("Authorization", "")
+        if self.path == "/application":
+            if auth.startswith("Bearer ") and signed(auth[7:]):
+                return self.answer(200, {"name": "Firefly Pocket CI", "environment": "PRODUCTION",
+                                         "redirect_urls": config["redirect_urls"], "services": ["AIS"]})
+            return self.answer(401, {"code": 401, "message": "Wrong signature"})
+        if self.path.startswith("/v1/models/"):
+            if self.headers.get("x-api-key") != config["anthropic_key"]:
+                return self.answer(401, {"type": "error", "error": {"type": "authentication_error",
+                                                                     "message": "invalid x-api-key"}})
+            model = self.path.rsplit("/", 1)[1]
+            if not model.startswith("claude-"):
+                return self.answer(404, {"type": "error", "error": {"message": f"model: {model}"}})
+            return self.answer(200, {"type": "model", "id": model})
+        if self.path == "/log":
+            return self.answer(200, log)
+        return self.answer(404, {"error": "not found"})
+
+    def do_POST(self):
+        body = self.rfile.read(int(self.headers.get("Content-Length") or 0)).decode(errors="replace")
+        if self.path == "/api/v3/checks/":
+            if self.headers.get("X-Api-Key") != config["healthchecks_key"]:
+                return self.answer(401, {"error": "wrong api key"})
+            check = json.loads(body)
+            log.append({"to": "healthchecks", "name": check.get("name"), "schedule": check.get("schedule"),
+                        "tz": check.get("tz")})
+            slug = check["name"].lower().replace(" ", "-")
+            host = self.headers.get("Host")
+            return self.answer(201, {"name": check["name"], "ping_url": f"http://{host}/ping/{slug}"})
+        if self.path.startswith("/ping/") or self.path.startswith("/ntfy/"):
+            log.append({"to": self.path, "title": self.headers.get("Title", ""), "body": body})
+            return self.answer(200, {"ok": True})
+        return self.answer(404, {"error": "not found"})
+
     def log_message(self, *args):
         pass
+
 
 server = HTTPServer(("127.0.0.1", 0), Handler)
 with open(port_file, "w") as f:
     f.write(str(server.server_address[1]))
 server.serve_forever()
 STUB
-app_id=3f9c2a71-5d0e-4b8a-9c21-7d4e5f6a8b90
-python3 "$jar/enable-banking.py" "$jar/application.crt" "$app_id" "$jar/eb-port" "${redirect_urls[@]}" &
+python3 "$jar/outside/outside.py" "$jar/outside/config.json" "$jar/outside/port" &
 stub=$!
-for _ in $(seq 20); do [ -s "$jar/eb-port" ] && break; sleep 0.5; done
-[ -s "$jar/eb-port" ] || fail "the stand-in for Enable Banking did not start"
-EB_API="http://127.0.0.1:$(cat "$jar/eb-port")"
-export EB_API
+for _ in $(seq 20); do [ -s "$jar/outside/port" ] && break; sleep 0.5; done
+[ -s "$jar/outside/port" ] || fail "the stand-ins did not start"
+outside="http://127.0.0.1:$(cat "$jar/outside/port")"
+export EB_API="$outside" ANTHROPIC_API="$outside" HEALTHCHECKS_API="$outside"
 bank() {
   ask_console "${here[@]}" -o /dev/null -w '%{http_code} %{redirect_url}' --data-urlencode "app_id=$1" "$admin/bank"
 }
@@ -362,8 +413,59 @@ scripts/firefly-pocket console apply
 given="$(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$(compose ps -q importer)" | grep '^ENABLE_BANKING_APP_ID=' || true)"
 [ "$given" = "ENABLE_BANKING_APP_ID=$app_id" ] || fail "the importer did not start again with the ID: it has \"$given\""
 page="$(ask_console "$request")"
-[[ "$page" == *"Firefly Pocket CI"*"Next: Finish"* ]] || fail "the console does not say the ID was kept"
+[[ "$page" == *"Firefly Pocket CI"*"Next: Suggestions"* ]] || fail "the console does not say the ID was kept"
 echo "the key stays on the server, its certificate is handed out, and only the right ID is kept"
+
+echo "==> the console's suggestions and alerts: each kept once it works"
+# post <path> <form fields...>: the console's request, applied. Not in a
+# subshell: request is the one it made, posted what became of it, and said what
+# the server said.
+post() {
+  local path="$1" went field data=(--data '')
+  shift
+  for field; do data+=(--data-urlencode "$field"); done
+  went="$(ask_console "${here[@]}" -o /dev/null -w '%{http_code} %{redirect_url}' "${data[@]}" "$admin$path")"
+  [[ "$went" =~ ^303\ ($admin/requests/[0-9a-f]{32})$ ]] || fail "$path got \"$went\""
+  request="${BASH_REMATCH[1]}"
+  scripts/firefly-pocket console apply >/dev/null
+  posted="$(state "${request##*/}")"
+  said="$(jq -r --arg id "${request##*/}" '.requests[$id].message // ""' compose/console/status/status.json)"
+}
+heard() { curl -fsS "$outside/log" | jq -r "$1"; }
+post /suggestions provider=anthropic "key=sk-ant-api03-not-$anthropic_key" model=
+[ "$posted" = refused ] || fail "a key the provider does not take: $posted: $said"
+[[ "$said" == *"invalid x-api-key"* ]] || fail "the server does not say why the key was refused: $said"
+[[ "$(ask_console "$request")" == *"invalid x-api-key"* ]] || fail "the console does not say why the key was refused"
+scripts/firefly-pocket config has ANTHROPIC_API_KEY && fail "a key the provider refused was kept"
+post /suggestions provider=anthropic "key=$anthropic_key" model=
+[ "$posted" = applied ] || fail "the AI key: $posted: $said"
+[ "$(scripts/firefly-pocket config get SUGGESTER_MODEL)" = claude-haiku-5-5 ] || fail "the model is not the default"
+[[ "$(ask_console "$admin/suggestions")" == *"…${anthropic_key: -4}"* ]] || fail "the console does not show the key's last four"
+topic="$outside/ntfy/firefly-pocket-boot-test"
+post /alerts/ntfy "url=http://127.0.0.1:9/ntfy/nobody"
+[ "$posted" = refused ] || fail "a topic ntfy does not take: $posted: $said"
+post /alerts/ntfy "url=$topic"
+[ "$posted" = applied ] || fail "the ntfy topic: $posted: $said"
+post /alerts/test
+[ "$posted" = applied ] || fail "the test alert: $posted: $said"
+[ "$(heard '[.[] | select(.to == "/ntfy/firefly-pocket-boot-test")] | length')" = 2 ] \
+  || fail "ntfy should have two test alerts: $(heard '.')"
+post /alerts/healthchecks "key=x$healthchecks_key"
+[ "$posted" = refused ] || fail "a wrong healthchecks.io key: $posted: $said"
+post /alerts/healthchecks "key=$healthchecks_key"
+[ "$posted" = applied ] || fail "the checks: $posted: $said"
+[ "$(heard '[.[] | select(.to == "healthchecks") | "\(.name) \(.schedule) \(.tz)"] | join(", ")')" \
+  = "Firefly Pocket nightly 0 3 * * * Europe/Ljubljana, Firefly Pocket backup 0 2 * * * Europe/Ljubljana" ] \
+  || fail "the checks are not the two, in the server's timezone: $(heard '.')"
+[ "$(heard '[.[] | select(.to | startswith("/ping/"))] | length')" = 2 ] || fail "the checks were not pinged once each"
+for key in HEALTHCHECK_NIGHTLY_URL HEALTHCHECK_BACKUP_URL NTFY_URL; do
+  scripts/firefly-pocket config has "$key" || fail "$key was not kept"
+done
+for secret in "$anthropic_key" "$healthchecks_key" firefly-pocket-boot-test; do
+  grep -rqF -- "$secret" compose/console && fail "a key or the topic is in a file the console reaches"
+done
+grep -rqF -- "$healthchecks_key" compose/config.json compose/secrets compose/.env && fail "the healthchecks.io API key was kept"
+echo "the AI key, the topic and the checks are kept once they work, and the console sees only their last four"
 
 echo "==> the console's Finish: the setup code goes"
 went="$(ask_console "${here[@]}" -o /dev/null -w '%{http_code} %{redirect_url}' --data '' "$admin/finish")"
@@ -391,9 +493,10 @@ answers=(
   ''               # Timezone: Europe/Ljubljana, saved in the console
                    # Firefly III account: the console made it, so no password is asked
   ''               # bank import: the console's ID, checked again with the stand-in
-  ''               # AI key: none
-  none             # ntfy: none
-  ''               # healthchecks.io: none
+  ''               # AI key: the console's, checked again with the stand-in
+  ''               # ntfy: the console's topic
+  n                # no test alert
+  ''               # healthchecks.io: the console's checks
   ''               # restic repository: none
   n                # deploy agent: off, never on a runner
 )

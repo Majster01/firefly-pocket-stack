@@ -447,11 +447,13 @@ class ConsoleTest(unittest.TestCase):
         self.assertNotIn(b'http-equiv="refresh"', page)
 
     # ------------------------------------------------- the steps in order ---
-    def bank_status(self, requests=None, **bank):
+    def bank_status(self, requests=None, suggestions=None, alerts=None, **bank):
         state = {"key": False, "certificate": "", "app_id": "",
                  "redirect_urls": ["https://app.fx.example.com/eb-callback", "https://import.fx.example.com/eb-callback"]}
         state.update(bank)
         self.account_status(account=True, setup_done=False, bank=state, requests=requests or {},
+                            suggestions=suggestions or {"anthropic": "", "gemini": "", "model": "claude-haiku-5-5"},
+                            alerts=alerts or {"ntfy": "", "healthchecks": False},
                             names=[{"role": "admin", "host": HOST}, {"role": "firefly", "host": "firefly.fx.example.com"},
                                    {"role": "app", "host": "app.fx.example.com"},
                                    {"role": "legal", "host": "legal.fx.example.com"}])
@@ -583,7 +585,7 @@ class ConsoleTest(unittest.TestCase):
             "state": "applied", "action": "bank", "at": "2026-11-06T12:00:00Z", "message": "Saved: it works."}})
         page = self.call("GET", location, cookie=cookie).body
         self.assertIn(b"Saved: it works.", page)
-        self.assertIn(b'href="/finish">Next: Finish', page)
+        self.assertIn(b'href="/suggestions">Next: Suggestions', page)
         page = self.call("GET", "/bank", cookie=cookie).body.decode()
         self.assertIn(f"This server uses the application <code>{APP_ID}</code>", page)
         self.assertIn(f'value="{APP_ID}"', page)
@@ -611,6 +613,112 @@ class ConsoleTest(unittest.TestCase):
         page = self.call("GET", "/finish", cookie=self.sign_in()).body.decode()
         self.assertIn("Firefly Pocket links no bank until it is", page)
         self.assertIn("scripts/firefly-pocket setup bank", page)
+
+    # -------------------------------------------- suggestions and alerts ---
+    def test_the_first_step_left(self):
+        for extra, where in (({}, "/bank"), ({"app_id": APP_ID}, "/suggestions"),
+                             ({"app_id": APP_ID, "suggestions": {"anthropic": "…wxyz", "model": "claude-haiku-5-5"}}, "/alerts"),
+                             ({"app_id": APP_ID, "suggestions": {"anthropic": "…wxyz", "model": "claude-haiku-5-5"},
+                               "alerts": {"ntfy": "…abcd", "healthchecks": False}}, "/finish")):
+            self.bank_status(**extra)
+            self.assertEqual(dict(self.call("POST", "/login", f"code={CODE}").headers)["Location"], where, extra)
+
+    def test_suggestions_page(self):
+        self.bank_status()
+        cookie = self.sign_in()
+        page = self.call("GET", "/suggestions", cookie=cookie).body.decode()
+        for want in ('name="provider" value="anthropic" checked', 'name="key" type="password"', 'value="claude-haiku-5-5"',
+                     "Skip it for now", 'aria-current="step">Suggestions'):
+            self.assertIn(want, page)
+        self.bank_status(suggestions={"anthropic": "", "gemini": "…Q9xz", "model": "gemini-2.5-flash"})
+        page = self.call("GET", "/suggestions", cookie=cookie).body.decode()
+        self.assertIn("Gemini's, <code>…Q9xz</code>, for <code>gemini-2.5-flash</code>", page)
+        self.assertIn('name="provider" value="gemini" checked', page)
+        self.assertIn("Next: Alerts", page)
+
+    def test_suggestions_refuses_what_cannot_be_right(self):
+        self.bank_status()
+        cookie = self.sign_in()
+        key = "sk-ant-api03-" + "x" * 40
+        for form, text in ((f"provider=gemini&key={key}&model=gemini-2.5-flash", b"That is an Anthropic key"),
+                           ("provider=anthropic&key=AIzaSyA" + "x" * 30 + "&model=", b"That is a Gemini key"),
+                           ("provider=anthropic&key=short&model=", b"at least 16"),
+                           ("provider=gemini&key=" + "y" * 39 + "&model=", b"A gemini-* model"),
+                           (f"provider=openai&key={key}&model=", b"Anthropic or Gemini")):
+            resp = self.call("POST", "/suggestions", form, cookie=cookie)
+            self.assertEqual(resp.status, 400, form)
+            self.assertIn(text, resp.body)
+            self.assertNotIn(b"x" * 30, resp.body)  # the key is never written back
+        self.assertEqual(self.requests(), [])
+
+    def test_suggestions_hands_the_key_to_the_agent(self):
+        self.bank_status()
+        cookie = self.sign_in()
+        key = "sk-ant-api03-" + "k" * 40
+        location, request = self.request_of(
+            self.call("POST", "/suggestions", f"provider=anthropic&key={key}&model=gemini-2.5-flash", cookie=cookie))
+        # A gemini model with an Anthropic key: the default Anthropic one instead.
+        self.assertEqual({k: request[k] for k in ("action", "code", "provider", "key", "model")},
+                         {"action": "suggestions", "code": "7K2MQ9TB0XH4PVRA", "provider": "anthropic", "key": key,
+                          "model": "claude-haiku-5-5"})
+        self.assertIn(b"Checking the key", self.call("GET", location, cookie=cookie).body)
+        rid = location.rsplit("/", 1)[1]
+        self.bank_status(requests={rid: {"state": "applied", "action": "suggestions", "at": "2026-11-06T12:00:00Z",
+                                         "message": "Saved: anthropic has claude-haiku-5-5 for this key."}})
+        page = self.call("GET", location, cookie=cookie).body
+        self.assertIn(b'href="/alerts">Next: Alerts', page)
+        self.assertNotIn(key.encode(), page)
+
+    def test_alerts_page(self):
+        self.bank_status()
+        cookie = self.sign_in()
+        page = self.call("GET", "/alerts", cookie=cookie).body.decode()
+        topic = re.search(r'name="url" value="(https://ntfy\.sh/firefly-pocket-([a-z0-9]{24}))"', page)
+        self.assertIsNotNone(topic)
+        self.assertNotEqual(topic.group(1), re.search(r'name="url" value="([^"]+)"',
+                                                       self.call("GET", "/alerts", cookie=cookie).body.decode()).group(1))
+        self.assertIn('action="/alerts/healthchecks"', page)
+        self.assertNotIn('action="/alerts/test"', page)  # no topic kept yet
+        self.assertEqual(self.call("POST", "/alerts/test", "", cookie=cookie).status, 409)
+        self.bank_status(alerts={"ntfy": "…3xq1", "healthchecks": True})
+        page = self.call("GET", "/alerts", cookie=cookie).body.decode()
+        for want in ("<code>…3xq1</code>", 'action="/alerts/test"', "Send no alerts to ntfy", "Both checks are made",
+                     "Make them again"):
+            self.assertIn(want, page)
+        self.assertEqual(self.requests(), [])
+
+    def test_alerts_hands_requests_to_the_agent(self):
+        self.bank_status(alerts={"ntfy": "…3xq1", "healthchecks": False})
+        cookie = self.sign_in()
+        resp = self.call("POST", "/alerts/ntfy", "url=ntfy.sh%2Fno+scheme", cookie=cookie)
+        self.assertEqual(resp.status, 400)
+        resp = self.call("POST", "/alerts/healthchecks", "key=short", cookie=cookie)
+        self.assertEqual(resp.status, 400)
+        self.assertEqual(self.requests(), [])
+        topic = "https://ntfy.sh/firefly-pocket-" + "a" * 24
+        for path, form, want in (("/alerts/ntfy", f"url={quote(topic)}", {"action": "ntfy", "url": topic}),
+                                 ("/alerts/ntfy", "url=", {"action": "ntfy", "url": ""}),
+                                 ("/alerts/test", "", {"action": "ntfy_test"}),
+                                 ("/alerts/healthchecks", "key=" + "h" * 32, {"action": "healthchecks", "key": "h" * 32})):
+            location, request = self.request_of(self.call("POST", path, form, cookie=cookie))
+            self.assertEqual({k: request[k] for k in want}, want)
+            self.assertEqual(request["code"], "7K2MQ9TB0XH4PVRA")
+            rid = location.rsplit("/", 1)[1]
+            self.bank_status(alerts={"ntfy": "…3xq1", "healthchecks": False}, requests={rid: {
+                "state": "applied", "action": want["action"], "at": "2026-11-06T12:00:00Z", "message": "Done."}})
+            self.assertIn(b'href="/alerts">Back', self.call("GET", location, cookie=cookie).body)
+
+    def test_finish_lists_suggestions_and_alerts(self):
+        self.bank_status(app_id=APP_ID, suggestions={"anthropic": "…wxyz", "gemini": "", "model": "claude-haiku-5-5"},
+                         alerts={"ntfy": "…3xq1", "healthchecks": True})
+        page = self.call("GET", "/finish", cookie=self.sign_in()).body.decode()
+        self.assertIn("Anthropic's key, <code>…wxyz</code>, for <code>claude-haiku-5-5</code>", page)
+        self.assertIn("ntfy, <code>…3xq1</code>, and healthchecks.io's two checks", page)
+        self.assertNotIn("<code>suggestions</code>:", page)
+        self.assertIn("<code>backups</code>", page)
+        for name in ("Server", "Firefly III account", "Bank connection", "Suggestions", "Alerts"):
+            self.assertIn(f'<li class="done"><a href=', page)
+            self.assertRegex(page, rf'<li class="done"><a href="/[a-z]+">{name}</a>')
 
     def test_no_code(self):
         resp = self.call("GET", "/", app=self.make(code=""))

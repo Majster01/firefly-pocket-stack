@@ -139,3 +139,7 @@ details { margin: 8px 0; }
 summary { cursor: pointer; color: var(--accent); }
 details pre { font-size: 0.8rem; }
 .new-key { margin-top: 24px; }
+fieldset.field { border: 0; padding: 0; margin: 0 0 16px; }
+fieldset.field legend { font-weight: 600; margin-bottom: 4px; padding: 0; }
+label.choice { display: inline-flex; gap: 6px; align-items: center; font-weight: 400; margin-right: 18px; }
+label.choice input { width: auto; }

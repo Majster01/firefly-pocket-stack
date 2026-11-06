@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Firefly Pocket Console: setup in the browser, on admin.<domain>.
 
-Setup UI steps 4 to 6. Until Firefly III has its account, every other host
+Setup UI steps 4 to 7. Until Firefly III has its account, every other host
 sends the browser here (the Caddyfile's setup gate), and this asks for the
 setup code that `scripts/firefly-pocket setup web` printed on the server. Its
 first page sets the domain, your email, your name and the timezone, and shows
@@ -11,8 +11,12 @@ account and a token for each app inside Firefly III, and starts everything,
 which opens the gate. Its third connects the bank: the server makes a key for
 an Enable Banking application, this hands out its certificate, and the server
 keeps the application's ID once Enable Banking takes a request signed with the
-key for it. Finish ends the setup code. Suggestions, alerts, backups and
-updates run over SSH for now, until the console takes those steps over too.
+key for it. Then the AI key for suggestions, which the server keeps once the
+provider has the model for it, and the alerts: an ntfy topic, kept once a test
+alert gets through, and healthchecks.io's two checks, made with an API key the
+server does not keep. Saved keys are write-only: this shows their last four
+characters. Finish ends the setup code. Backups and updates run over SSH for
+now, until the console takes those steps over too.
 
 It is built so that taking it over gains little:
 
@@ -148,13 +152,13 @@ STEPS = (
     ("Server", "/server"),
     ("Firefly III account", "/account"),
     ("Bank connection", "/bank"),
-    ("Suggestions", None),
-    ("Alerts", None),
+    ("Suggestions", "/suggestions"),
+    ("Alerts", "/alerts"),
     ("Backups", None),
     ("Updates", None),
     ("Finish", "/finish"),
 )
-SERVER, ACCOUNT, BANK, FINISH = 0, 1, 2, 7
+SERVER, ACCOUNT, BANK, SUGGESTIONS, ALERTS, FINISH = 0, 1, 2, 3, 4, 7
 
 # Firefly III's minimum, which the agent checks again.
 MIN_PASSWORD = 16
@@ -168,11 +172,25 @@ OUTCOME = {
     "account": ("Done", "Not done", "Making your account"),
     "bank_key": ("Made", "Not made", "Making the key"),
     "bank": ("Saved", "Not saved", "Checking with Enable Banking"),
+    "suggestions": ("Saved", "Not saved", "Checking the key"),
+    "ntfy": ("Saved", "Not saved", "Sending a test alert"),
+    "ntfy_test": ("Sent", "Not sent", "Sending a test alert"),
+    "healthchecks": ("Made", "Not made", "Making the checks"),
     "finish": ("Setup is finished", "Not finished", "Finishing"),
 }
 # The page each request goes back to, and the step after it once it is done.
-BACK = {"server": "/server", "account": "/account", "bank_key": "/bank", "bank": "/bank", "finish": "/finish"}
-NEXT = {"server": ("/account", "Firefly III account"), "account": ("/bank", "Bank connection"), "bank": ("/finish", "Finish")}
+BACK = {"server": "/server", "account": "/account", "bank_key": "/bank", "bank": "/bank", "suggestions": "/suggestions",
+        "ntfy": "/alerts", "ntfy_test": "/alerts", "healthchecks": "/alerts", "finish": "/finish"}
+NEXT = {"server": ("/account", "Firefly III account"), "account": ("/bank", "Bank connection"),
+        "bank": ("/suggestions", "Suggestions"), "suggestions": ("/alerts", "Alerts"), "ntfy": ("/finish", "Finish"),
+        "ntfy_test": ("/finish", "Finish"), "healthchecks": ("/finish", "Finish")}
+
+# As scripts/config.sh checks an API key and a model, and the providers' defaults.
+API_KEY_RE = re.compile(r"[A-Za-z0-9._-]{16,}")
+MODEL_RE = re.compile(r"(claude|gemini)-[a-z0-9.-]+")
+DEFAULT_MODEL = "claude-haiku-5-5"
+PROVIDERS = {"anthropic": "Anthropic", "gemini": "Gemini"}
+URL_RE = re.compile(r"https?://[^\s$\\]+")
 
 # As scripts/config.sh checks ENABLE_BANKING_APP_ID.
 APP_ID_RE = re.compile(r"[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}")
@@ -453,6 +471,12 @@ class Console:
             return self.make_key(req)
         if path == "/bank/certificate" and not post:
             return self.certificate()
+        if path == "/suggestions":
+            return self.save_suggestions(req) if post else self.suggestions_page(req)
+        if path == "/alerts" and not post:
+            return self.alerts_page(req)
+        if path in ("/alerts/ntfy", "/alerts/test", "/alerts/healthchecks") and post:
+            return self.save_alerts(req, path.rsplit("/", 1)[1])
         if path == "/finish":
             return self.save_finish(req) if post else self.finish_page(req)
         match = re.fullmatch(r"/requests/([0-9a-f]{32})", path)
@@ -831,9 +855,9 @@ class Console:
     </details>"""
         saved = f'<p class="good">This server uses the application <code>{esc(app_id)}</code>.</p>' if app_id else ""
         if app_id:
-            after = '<p><a class="button" href="/finish">Next: Finish</a></p>'
+            after = '<p><a class="button" href="/suggestions">Next: Suggestions</a></p>'
         else:
-            after = """<p>Firefly Pocket links no bank until this is done. <a href="/finish">Skip it for now</a>: on the
+            after = """<p>Firefly Pocket links no bank until this is done. <a href="/suggestions">Skip it for now</a>: on the
     server, <code>scripts/firefly-pocket setup bank</code> does it later.</p>"""
         body = f"""
 <div class="setup">
@@ -886,6 +910,192 @@ class Console:
             self.pending[rid] = (self.clock(), action, "")
         return redirect(f"/requests/{rid}")
 
+    # -------------------------------------------------------- suggestions ---
+    def needs_account(self, current: int, title: str, status: int) -> Response:
+        state = read_status(self.status_file)
+        body = f"""
+<div class="setup">
+  {stepper(current, state)}
+  <section class="panel">
+    <h1>{esc(title)}</h1>
+    <p>Make the Firefly III account first.</p>
+    <p><a class="button" href="/account">Firefly III account</a></p>
+  </section>
+</div>"""
+        return self.page(status, title, body, signed_in=True)
+
+    def suggestions_page(self, req: Request, status: int = 200, values=None, errors=None, note: str = "") -> Response:
+        state = read_status(self.status_file)
+        if not account_made(state):
+            return self.needs_account(SUGGESTIONS, "Category suggestions", status)
+        kept = part(state, "suggestions")
+        model = str(kept.get("model") or DEFAULT_MODEL)
+        saved = [(name, str(kept.get(key))) for key, name in PROVIDERS.items() if kept.get(key)]
+        values = values or {"provider": "gemini" if model.startswith("gemini-") else "anthropic", "model": model}
+        errors = errors or {}
+        saved_html = ""
+        if saved:
+            keys = " and ".join(f"{esc(name)}'s, <code>{esc(last)}</code>" for name, last in saved)
+            saved_html = f'<p class="good">This server has a key: {keys}, for <code>{esc(model)}</code>.</p>'
+        radios = "".join(
+            f'<label class="choice"><input type="radio" name="provider" value="{key}"'
+            f'{" checked" if values.get("provider") == key else ""}> {esc(name)}</label>'
+            for key, name in PROVIDERS.items()
+        )
+        model_error = errors.get("model", "")
+        after = ('<p><a class="button" href="/alerts">Next: Alerts</a></p>' if saved else
+                 """<p>Firefly Pocket makes no suggestions until this is done. <a href="/alerts">Skip it for now</a>: on the
+    server, <code>scripts/firefly-pocket setup suggestions</code> does it later.</p>""")
+        body = f"""
+<div class="setup">
+  {stepper(SUGGESTIONS, state)}
+  <section class="panel">
+    <h1>Category suggestions</h1>
+    {note}
+    <p>Each night an AI model suggests a category for each new transaction, as a rule you approve in Firefly
+    Pocket. It needs an API key: Anthropic's (<a href="https://console.anthropic.com/" rel="noreferrer">console.anthropic.com</a>,
+    an account with credit) or Google's for Gemini (a paid project: the free tier allows 20 requests a day).</p>
+    {saved_html}
+    <form method="post" action="/suggestions" novalidate>
+      <fieldset class="field"><legend>Provider</legend>{radios}
+        {f'<p class="error">{esc(errors["provider"])}</p>' if errors.get("provider") else ''}</fieldset>
+      {secret_field("key", "API key", errors.get("key", ""),
+                    "Kept on the server only: this page shows its last four characters, never the key.")}
+      <div class="field">
+        <label for="model">Model</label>
+        <input id="model" name="model" value="{esc(values.get("model", ""))}" autocomplete="off" spellcheck="false"
+               aria-describedby="model-help{' model-error' if model_error else ''}"{' aria-invalid="true"' if model_error else ''}>
+        {f'<p class="error" id="model-error">{esc(model_error)}</p>' if model_error else ''}
+        <p class="quiet" id="model-help">Anthropic: {DEFAULT_MODEL} unless you choose another. Gemini: a gemini-* model,
+        as Google names it.</p>
+      </div>
+      <button type="submit">Check and save</button>
+    </form>
+    <p class="quiet">The server asks the provider for the model with this key before it keeps it.</p>
+    <h2>Next</h2>
+    {after}
+  </section>
+</div>"""
+        return self.page(status, "Category suggestions", body, signed_in=True)
+
+    def save_suggestions(self, req: Request) -> Response:
+        if not account_made(read_status(self.status_file)):
+            return self.suggestions_page(req, 409)
+        form = req.form()
+        provider = form.get("provider", "")
+        key = form.get("key", "").strip()
+        model = form.get("model", "").strip()
+        errors: dict[str, str] = {}
+        if provider not in PROVIDERS:
+            errors["provider"] = "Anthropic or Gemini"
+        elif key.startswith("sk-ant-") and provider != "anthropic":
+            errors["key"] = "That is an Anthropic key"
+        elif key.startswith("AIza") and provider != "gemini":
+            errors["key"] = "That is a Gemini key"
+        if "key" not in errors and not API_KEY_RE.fullmatch(key):
+            errors["key"] = "An API key: at least 16 letters, digits, dots, dashes and underscores"
+        if provider == "anthropic":
+            model = model if model.startswith("claude-") else DEFAULT_MODEL
+        elif provider == "gemini" and not model.startswith("gemini-"):
+            errors["model"] = "A gemini-* model, as Google names it"
+        if "model" not in errors and not MODEL_RE.fullmatch(model):
+            errors["model"] = "A claude-* or gemini-* model name"
+        if errors:
+            return self.suggestions_page(req, 400, {"provider": provider, "model": model}, errors)
+        return self.hand_over(req, "suggestions", {"provider": provider, "key": key, "model": model},
+                              self.suggestions_page)
+
+    # ------------------------------------------------------------- alerts ---
+    def alerts_page(self, req: Request, status: int = 200, errors=None, note: str = "", topic: str = "") -> Response:
+        state = read_status(self.status_file)
+        if not account_made(state):
+            return self.needs_account(ALERTS, "Alerts", status)
+        kept = part(state, "alerts")
+        errors = errors or {}
+        ntfy = str(kept.get("ntfy") or "")
+        topic = topic or f"https://ntfy.sh/firefly-pocket-{new_topic()}"
+        url_error = errors.get("url", "")
+        topic_form = f"""
+    <form method="post" action="/alerts/ntfy" novalidate>
+      <div class="field">
+        <label for="url">Topic URL</label>
+        <input id="url" name="url" value="{esc(topic)}" autocomplete="off" spellcheck="false"
+               aria-describedby="url-help{' url-error' if url_error else ''}"{' aria-invalid="true"' if url_error else ''}>
+        {f'<p class="error" id="url-error">{esc(url_error)}</p>' if url_error else ''}
+        <p class="quiet" id="url-help">Made for this server. Anyone who knows its name can read what goes to it, so the
+        name is long and random: keep it to yourself. Subscribe to it first, in the ntfy app (Android, iOS): Subscribe
+        to topic, the name after <code>ntfy.sh/</code>. Then Save sends it a test alert, and the server keeps it once
+        ntfy takes that.</p>
+      </div>
+      <button type="submit">Save and send a test</button>
+    </form>"""
+        if ntfy:
+            ntfy_html = f"""
+    <p class="good">This server sends alerts to its topic, <code>{esc(ntfy)}</code>.</p>
+    <form method="post" action="/alerts/test"><button type="submit">Send a test alert</button></form>
+    <details><summary>Another topic</summary>{topic_form}
+      <form method="post" action="/alerts/ntfy"><input type="hidden" name="url" value="">
+        <button type="submit" class="link">Send no alerts to ntfy</button></form>
+    </details>"""
+        else:
+            ntfy_html = topic_form
+        key_error = errors.get("key", "")
+        checks_form = f"""
+    <form method="post" action="/alerts/healthchecks" novalidate>
+      {secret_field("key", "healthchecks.io API key", key_error,
+                    "Your project's Settings, API Access: the read-write key. The server uses it once, to make the two "
+                    "checks, and does not keep it.")}
+      <button type="submit">Make the checks</button>
+    </form>"""
+        if kept.get("healthchecks"):
+            checks_html = f"""
+    <p class="good">Both checks are made: healthchecks.io mails you when the nightly import or the backup does not
+    report in on time.</p>
+    <details><summary>Make them again</summary>{checks_form}</details>"""
+        else:
+            checks_html = checks_form
+        body = f"""
+<div class="setup">
+  {stepper(ALERTS, state)}
+  <section class="panel">
+    <h1>Alerts</h1>
+    {note}
+    <p>When something fails (an import, a backup, a bank consent about to end), an alert goes to the Firefly Pocket
+    app on your phone, and to <a href="https://ntfy.sh/" rel="noreferrer">ntfy</a>, which works even when Firefly
+    Pocket does not.</p>
+    <h2>ntfy</h2>
+    {ntfy_html}
+    <h2>A dead man's switch</h2>
+    <p>Every alert above is sent from this server, so when it is down nothing alerts at all.
+    <a href="https://healthchecks.io/" rel="noreferrer">healthchecks.io</a> (free) mails you when the nightly import or
+    the backup does not report in on time. Its API key makes both checks, with their schedules in this server's
+    timezone.</p>
+    {checks_html}
+    <h2>Next</h2>
+    <p><a class="button" href="/finish">Next: Finish</a></p>
+  </section>
+</div>"""
+        return self.page(status, "Alerts", body, signed_in=True)
+
+    def save_alerts(self, req: Request, what: str) -> Response:
+        state = read_status(self.status_file)
+        if not account_made(state):
+            return self.alerts_page(req, 409)
+        form = req.form()
+        if what == "test":
+            if not part(state, "alerts").get("ntfy"):
+                return self.alerts_page(req, 409)
+            return self.hand_over(req, "ntfy_test", {}, self.alerts_page)
+        if what == "ntfy":
+            url = form.get("url", "").strip()
+            if url and not URL_RE.fullmatch(url):
+                return self.alerts_page(req, 400, {"url": "An http:// or https:// URL, without spaces"}, topic=url)
+            return self.hand_over(req, "ntfy", {"url": url}, self.alerts_page)
+        key = form.get("key", "").strip()
+        if not API_KEY_RE.fullmatch(key):
+            return self.alerts_page(req, 400, {"key": "An API key: at least 16 letters and digits"})
+        return self.hand_over(req, "healthchecks", {"key": key}, self.alerts_page)
+
     # ------------------------------------------------------------- finish ---
     def finish_page(self, req: Request, status: int = 200, note: str = "") -> Response:
         state = read_status(self.status_file)
@@ -908,6 +1118,18 @@ class Console:
         bank = (f"the application <code>{esc(app_id)}</code>" if app_id else
                 '<span class="bad">not yet: Firefly Pocket links no bank until it is.</span> On the server, '
                 "<code>scripts/firefly-pocket setup bank</code> does it later.")
+        kept = part(state, "suggestions")
+        keys = [f"{name}'s key, <code>{esc(kept.get(key))}</code>" for key, name in PROVIDERS.items() if kept.get(key)]
+        suggestions = (f"{' and '.join(keys)}, for <code>{esc(kept.get('model') or DEFAULT_MODEL)}</code>" if keys else
+                       '<span class="bad">not yet: no suggestions until it is.</span> '
+                       "<code>scripts/firefly-pocket setup suggestions</code> does it later.")
+        alerts_kept = part(state, "alerts")
+        alerts = [f"ntfy, <code>{esc(alerts_kept.get('ntfy'))}</code>"] if alerts_kept.get("ntfy") else []
+        if alerts_kept.get("healthchecks"):
+            alerts.append("healthchecks.io's two checks")
+        alerts_html = (", and ".join(alerts) if alerts else
+                       '<span class="bad">only the Firefly Pocket app:</span> no ntfy, and nothing tells you when this '
+                       "server is down. <code>scripts/firefly-pocket setup alerts</code> does it later.")
         body = f"""
 <div class="setup">
   {stepper(FINISH, state)}
@@ -920,13 +1142,13 @@ class Console:
       <tr><th scope="row"><a href="/account">Firefly III account</a></th>
           <td>made: you sign in at <code>https://{esc(firefly)}</code></td></tr>
       <tr><th scope="row"><a href="/bank">Bank connection</a></th><td>{bank}</td></tr>
+      <tr><th scope="row"><a href="/suggestions">Suggestions</a></th><td>{suggestions}</td></tr>
+      <tr><th scope="row"><a href="/alerts">Alerts</a></th><td>{alerts_html}</td></tr>
     </tbody></table>
     <h2>Left for the server, over SSH</h2>
     <p>These have no page here yet. On the server, each is <code>scripts/firefly-pocket setup &lt;step&gt;</code>,
     before or after Finish:</p>
     <ul>
-      <li><code>suggestions</code>: an Anthropic or Gemini key, for category suggestions</li>
-      <li><code>alerts</code>: an ntfy topic for alerts on your phone, and healthchecks.io checks</li>
       <li><code>backups</code>: a restic repository, off this server</li>
       <li><code>updates</code>: the deploy agent. It also runs the nightly jobs: the bank import, the backup and
       the restore tests. Until it is on, nothing runs on a schedule.</li>
@@ -1056,17 +1278,38 @@ class Console:
 
 def next_step(state: dict) -> str:
     """The first page with something left to do."""
-    if account_made(state):
-        return "/bank"
-    return "/account" if server_saved(state) else "/server"
+    if not account_made(state):
+        return "/account" if server_saved(state) else "/server"
+    done = steps_done(state)
+    for step, path in ((BANK, "/bank"), (SUGGESTIONS, "/suggestions"), (ALERTS, "/alerts")):
+        if step not in done:
+            return path
+    return "/finish"
 
 
-def stepper(current: int, state: dict) -> str:
+def steps_done(state: dict) -> set[int]:
     done = {SERVER} if server_saved(state) else set()
     if account_made(state):
         done.add(ACCOUNT)
     if part(state, "bank").get("app_id"):
         done.add(BANK)
+    suggestions = part(state, "suggestions")
+    if any(suggestions.get(key) for key in PROVIDERS):
+        done.add(SUGGESTIONS)
+    alerts = part(state, "alerts")
+    if alerts.get("ntfy") or alerts.get("healthchecks"):
+        done.add(ALERTS)
+    return done
+
+
+def new_topic() -> str:
+    """24 lower-case letters and digits, as the wizard makes an ntfy topic's name."""
+    alphabet = "abcdefghijklmnopqrstuvwxyz0123456789"
+    return "".join(secrets.choice(alphabet) for _ in range(24))
+
+
+def stepper(current: int, state: dict) -> str:
+    done = steps_done(state)
     items = ""
     for i, (name, path) in enumerate(STEPS):
         kind = "now" if i == current else ("done" if i in done else "later")
@@ -1074,7 +1317,7 @@ def stepper(current: int, state: dict) -> str:
         label = f'<a href="{path}">{esc(name)}</a>' if path and i != current else esc(name)
         items += f'<li class="{kind}"{aria}>{label}</li>'
     return f"""<nav class="steps" aria-label="Setup steps"><ol>{items}</ol>
-    <p class="quiet">Suggestions, alerts, backups and updates run over SSH for now.</p></nav>"""
+    <p class="quiet">Backups and updates run over SSH for now.</p></nav>"""
 
 
 def password_field(name: str, label: str, error: str, help_text: str) -> str:
@@ -1087,6 +1330,19 @@ def password_field(name: str, label: str, error: str, help_text: str) -> str:
                required{' aria-invalid="true"' if error else ''}{f' aria-describedby="{described}"' if described else ''}>
         {f'<p class="error" id="{name}-error">{esc(error)}</p>' if error else ''}
         {f'<p class="quiet" id="{name}-help">{esc(help_text)}</p>' if help_text else ''}
+      </div>"""
+
+
+def secret_field(name: str, label: str, error: str, help_text: str) -> str:
+    """A key to send to the server: never shown again, after an error either."""
+    described = " ".join(x for x in (f"{name}-help", f"{name}-error" if error else "") if x)
+    return f"""
+      <div class="field">
+        <label for="{name}">{esc(label)}</label>
+        <input id="{name}" name="{name}" type="password" autocomplete="off" spellcheck="false"
+               required{' aria-invalid="true"' if error else ''} aria-describedby="{described}">
+        {f'<p class="error" id="{name}-error">{esc(error)}</p>' if error else ''}
+        <p class="quiet" id="{name}-help">{esc(help_text)}</p>
       </div>"""
 
 
