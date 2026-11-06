@@ -123,7 +123,15 @@ fp render >/dev/null && ok "after that, render goes ahead" || fail "render still
 
 echo "==> import of a hand-edited .env"
 rm -rf compose/.env compose/config.json compose/secrets/env compose/.env.rendered
-rand() { LC_ALL=C tr -dc 'A-Za-z0-9' < /dev/urandom | head -c "$1" || true; }
+# A bounded read each time, as gen-secrets.sh does: tr | head on /dev/urandom
+# leaves tr writing into a closed pipe.
+rand() {
+  local out=""
+  while [ "${#out}" -lt "$1" ]; do
+    out="$out$(LC_ALL=C head -c 2048 /dev/urandom | LC_ALL=C tr -dc 'A-Za-z0-9')"
+  done
+  printf '%s' "${out:0:$1}"
+}
 declare -A fake=(
   [FIREFLY_APP_KEY]="$(rand 32)" [STATIC_CRON_TOKEN]="$(rand 32)" [AUTO_IMPORT_SECRET]="$(rand 32)"
   [POSTGRES_SUPER_PASSWORD]="$(rand 32)" [FIREFLY_DB_PASSWORD]="$(rand 32)" [IMPORTER_DB_PASSWORD]="$(rand 32)"
