@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# The server's half of the Firefly Pocket Console (Setup UI steps 4 and 5).
+# The server's half of the Firefly Pocket Console (Setup UI steps 4 to 6).
 #
 #     scripts/firefly-pocket console apply     apply what the console saved, then write its status
 #     scripts/firefly-pocket console status    write its status only
@@ -13,10 +13,11 @@
 # This is the only thing that reads the one and writes the other:
 #
 #   inbox/<32 hex>.json  one request, carrying the setup code, so a file another user of
-#                        this machine drops in does nothing. Refused once setup is finished,
-#                        when the importer has its Firefly III token: from then on the
-#                        console has no say, until it signs in with Firefly III (Setup UI
-#                        step 8). Two kinds:
+#                        this machine drops in does nothing. The code works until setup is
+#                        finished: until the console's Finish, or the wizard's, removes it.
+#                        From then on the console has no say, until it signs in with
+#                        Firefly III (Setup UI step 8). Before Firefly III has its account
+#                        (the importer's token, which opens the gate), two kinds:
 #       {"action": "server", "code": "...", "settings": {"DOMAIN": "...", "SITE_OWNER": "...",
 #        "LEGAL_OWNER_NAME": "...", "TZ": "..."}}
 #                        those four settings and no other; each value is checked as config
@@ -29,9 +30,22 @@
 #                        $SITE_OWNER and one token per app made inside Firefly III, then
 #                        every service started, which opens the gate. Minutes; the request
 #                        says how far it got as it goes
+#                        and after it, three:
+#       {"action": "bank_key", "code": "..."}
+#                        the wizard's bank step, its first half (bank.sh): a new key for an
+#                        Enable Banking application, kept in the store, and its certificate,
+#                        which the status shows for the console to hand out. The application
+#                        ID goes, as it was the old key's; the importer starts again
+#       {"action": "bank", "code": "...", "app_id": "..."}
+#                        its second half: kept, and the importer started again with it, once
+#                        Enable Banking takes a request signed with the key for that ID
+#       {"action": "finish", "code": "..."}
+#                        the end of setup: the code is removed, and the console starts
+#                        again without it
 #   status/status.json   those settings, the five names, this server's addresses and
-#                        timezone, whether setup is finished, and what became of the last
-#                        20 requests. No secret.
+#                        timezone, whether Firefly III has its account and whether setup is
+#                        finished, the bank step's certificate, application ID and redirect
+#                        URLs, and what became of the last 20 requests. No secret.
 #
 # apply runs under the lock the deploy and the cron jobs take, one request after
 # another in the order the console wrote them.
@@ -52,8 +66,12 @@ declare -A LABEL=([DOMAIN]="the domain" [SITE_OWNER]="your email" [LEGAL_OWNER_N
 
 # shellcheck source=host.sh
 source "$REPO_ROOT/scripts/host.sh"
+# shellcheck source=bank.sh
+source "$REPO_ROOT/scripts/bank.sh"
 
 die() { echo "FATAL: $*" >&2; exit 1; }
+# refuse: as die, for a request that changed nothing.
+refuse() { echo "FATAL: $*" >&2; exit 2; }
 
 # The directories the console's container mounts. Made here, by this user,
 # before compose starts it: Docker would make missing ones itself, owned by
@@ -77,9 +95,13 @@ env_value() {
   sed -n "s/^$1=//p" "$COMPOSE_DIR/.env" | tail -n 1
 }
 
-# Setup is finished once the importer has its Firefly III token: compose
-# derives the gate from the same line of compose/.env (FIREFLY_POCKET_SETUP).
-setup_done() { [ -n "$(env_value IMPORTER_FIREFLY_TOKEN)" ]; }
+# Firefly III has its account once the importer has its token: compose derives
+# the gate from the same line of compose/.env (FIREFLY_POCKET_SETUP).
+account_made() { [ -n "$(env_value IMPORTER_FIREFLY_TOKEN)" ]; }
+# Setup is finished once Firefly III has its account and there is no setup
+# code: the console's Finish and the wizard's remove it, and a server set up
+# over SSH alone never had one.
+setup_done() { account_made && [ -z "$(env_value SETUP_CODE)" ]; }
 
 compose() { docker compose --project-directory "$COMPOSE_DIR" "$@"; }
 ok() { printf '   ok: %s\n' "$*"; }
@@ -94,36 +116,60 @@ result() {
   echo "request $1: $2: $3"
 }
 
-# The five names, as lib.sh derives them from this compose/.env. In a bash of
+# The five names, and the redirect URLs Enable Banking needs, as lib.sh and
+# bank.sh derive them from this compose/.env: console.sh _names. In a process of
 # its own: lib.sh stops a script that has no .env, or a name and no domain.
 names_json() {
-  local hosts
-  [ -f "$COMPOSE_DIR/.env" ] || { echo '[]'; return 0; }
-  # shellcheck disable=SC2016  # expanded by that bash
-  hosts="$(bash -c 'source "$1/scripts/lib.sh" >/dev/null 2>&1 &&
-    printf "%s\n" "$ADMIN_HOSTNAME" "$FIREFLY_HOSTNAME" "$NEXT_HOSTNAME" "$IMPORT_HOSTNAME" "$LEGAL_HOSTNAME"' \
-    _ "$REPO_ROOT")" || { echo '[]'; return 0; }
-  jq -Rnc '[inputs] as $hosts | [["admin", "firefly", "app", "import", "legal"], $hosts]
-    | transpose | map({role: .[0], host: .[1]})' <<<"$hosts"
+  [ -f "$COMPOSE_DIR/.env" ] || { echo '{"names": [], "redirect_urls": []}'; return 0; }
+  "$REPO_ROOT/scripts/console.sh" _names 2>/dev/null || echo '{"names": [], "redirect_urls": []}'
+}
+
+cmd_names() {
+  local urls
+  # shellcheck source=lib.sh
+  source "$REPO_ROOT/scripts/lib.sh" >/dev/null 2>&1
+  mapfile -t urls < <(eb_redirect_urls)
+  jq -nc --args '{
+      names: ([["admin", "firefly", "app", "import", "legal"], $ARGS.positional[0:5]] | transpose
+        | map({role: .[0], host: .[1]})),
+      redirect_urls: $ARGS.positional[5:] }' \
+    "$ADMIN_HOSTNAME" "$FIREFLY_HOSTNAME" "$NEXT_HOSTNAME" "$IMPORT_HOSTNAME" "$LEGAL_HOSTNAME" "${urls[@]}"
+}
+
+# The bank step's: whether there is a key, its certificate when this server made
+# it (public: it is uploaded to Enable Banking), and the application ID.
+bank_json() {
+  local key cert="" has_key=false
+  key="$(env_value ENABLE_BANKING_PRIVATE_KEY)"
+  if [ -n "$key" ]; then
+    has_key=true
+    ! eb_cert_matches "$key" || cert="$(cat "$EB_CERT")"
+  fi
+  key=""
+  jq -nc --argjson key "$has_key" --arg certificate "$cert" --arg app_id "$(env_value ENABLE_BANKING_APP_ID)" \
+    '{key: $key, certificate: $certificate, app_id: $app_id}'
 }
 
 write_status() {
-  local old='{}' tmp finished=false
+  local old='{}' tmp account=false finished=false
   console_dirs
   if [ -f "$STATUS" ]; then
     old="$(jq -c '.requests // {} | objects' "$STATUS" 2>/dev/null || true)"
     [ -n "$old" ] || old='{}'
   fi
+  ! account_made || account=true
   ! setup_done || finished=true
   tmp="$(mktemp "$CONSOLE_DIR/status/.status.XXXXXX")"
-  jq -n --arg written "$(date -u +%FT%TZ)" --argjson finished "$finished" \
+  jq -n --arg written "$(date -u +%FT%TZ)" --argjson account "$account" --argjson finished "$finished" \
         --arg domain "$(stored DOMAIN)" --arg owner "$(stored SITE_OWNER)" \
         --arg name "$(stored LEGAL_OWNER_NAME)" --arg tz "$(stored TZ)" --arg admin "$(stored ADMIN_HOSTNAME)" \
         --arg host_tz "$(host_timezone)" --arg v4 "$(my_address 4)" --arg v6 "$(my_address 6)" \
-        --argjson names "$(names_json)" --argjson old "$old" --argjson new "$RESULTS" '
-    { written: $written, setup_done: $finished,
+        --argjson derived "$(names_json)" --argjson bank "$(bank_json)" \
+        --argjson old "$old" --argjson new "$RESULTS" '
+    { written: $written, account: $account, setup_done: $finished,
       settings: {DOMAIN: $domain, SITE_OWNER: $owner, LEGAL_OWNER_NAME: $name, TZ: $tz, ADMIN_HOSTNAME: $admin},
-      host_timezone: $host_tz, addresses: {v4: $v4, v6: $v6}, names: $names,
+      host_timezone: $host_tz, addresses: {v4: $v4, v6: $v6}, names: $derived.names,
+      bank: ($bank + {redirect_urls: $derived.redirect_urls}),
       requests: ($old + $new | to_entries | sort_by(.value.at) | .[-20:] | from_entries) }' > "$tmp"
   chmod 644 "$tmp"
   mv -f "$tmp" "$STATUS"
@@ -150,7 +196,7 @@ apply_one() {
   fi
   ACTION="$(jq -r 'if type == "object" and (.action | type) == "string" then .action else "" end' <"$file" 2>/dev/null || true)"
   case "$ACTION" in
-    server | account) ;;
+    server | account | bank_key | bank | finish) ;;
     *)
       ACTION=""
       result "$id" refused "Not a request this version of the server knows."
@@ -164,7 +210,38 @@ apply_one() {
     result "$id" refused "Not this server's setup code: the request did not come from its console."
     return 1
   fi
+  # The steps in their order: the Server step and the account until the
+  # account exists, the bank step and Finish after.
+  if account_made; then
+    case "$ACTION" in
+      server)
+        result "$id" refused "Firefly III has its account, so the Server step is done. To change it, on the server: scripts/firefly-pocket setup domain, or setup you"
+        return 1
+        ;;
+      account)
+        result "$id" refused "Firefly III has its account already."
+        return 1
+        ;;
+    esac
+  elif [ "$ACTION" != server ] && [ "$ACTION" != account ]; then
+    result "$id" refused "Make the Firefly III account first."
+    return 1
+  fi
   "apply_$ACTION" "$id" "$file"
+}
+
+# child <name> [args...]: console.sh _<name> in a process of its own, so that
+# set -e stops it at the first failure; stdin goes to it. What it says goes to
+# the journal as it says it, and MESSAGE is its last "FATAL: " line, or else its
+# last "DONE: " line.
+child() {
+  local log rc=0
+  log="$(mktemp)"
+  "$REPO_ROOT/scripts/console.sh" "_$1" "${@:2}" 2>&1 | tee "$log" >&2 || rc=$?
+  MESSAGE="$(sed -n 's/^FATAL: //p' "$log" | tail -n 1)"
+  [ "$rc" -ne 0 ] || MESSAGE="$(sed -n 's/^DONE: //p' "$log" | tail -n 1)"
+  rm -f "$log"
+  return "$rc"
 }
 
 # apply_server <id> <file>: 0 when it changed a setting.
@@ -220,7 +297,7 @@ apply_server() {
 
 # apply_account <id> <file>: 1, always: what it starts, it starts itself.
 apply_account() {
-  local id="$1" file="$2" password length log message rc=0
+  local id="$1" file="$2" password length message rc=0
   # Only the shape the console writes: a password with no control character.
   password="$(jq -er '.password | strings | select(explode | all(. >= 32 and . != 127))' <"$file" 2>/dev/null)" \
     || { result "$id" refused "Not a request this version of the server knows."; return 1; }
@@ -235,21 +312,69 @@ apply_account() {
   fi
   result "$id" running "Starting."
   write_status
-  log="$(mktemp)"
   # On stdin, as the wizard takes it: never on a command line or in the environment.
-  printf '%s' "$password" | "$REPO_ROOT/scripts/console.sh" _account "$id" 2>"$log" || rc=$?
+  child account "$id" < <(printf '%s' "$password") || rc=$?
   password=""
-  cat "$log" >&2
-  message="$(sed -n 's/^FATAL: //p' "$log" | tail -n 1)"
-  rm -f "$log"
-  message="${message:-It stopped; journalctl -u firefly-pocket-console says where.}"
+  message="${MESSAGE:-It stopped; journalctl -u firefly-pocket-console says where.}"
   message="${message%.}."
   if [ "$rc" -eq 0 ]; then
     result "$id" applied "Your Firefly III account is ready, and every service runs."
-  elif setup_done; then
+  elif account_made; then
     result "$id" failed "$message The account and the tokens are made. To start the rest, on the server: scripts/firefly-pocket setup start"
   else
     result "$id" failed "$message Nothing is public yet. Try again, or on the server: scripts/firefly-pocket setup account"
+  fi
+  return 1
+}
+
+# apply_bank_key <id> <file>, apply_bank <id> <file>: 1, always: the importer
+# is the only one to start again, and console.sh _bank_key and _bank start it.
+apply_bank_key() {
+  local id="$1" rc=0
+  result "$id" running "Making the key."
+  write_status
+  child bank_key || rc=$?
+  bank_result "$id" "$rc" "A new key, and its certificate to upload with your application. The private key stays on this server."
+  return 1
+}
+
+apply_bank() {
+  local id="$1" file="$2" app_id rc=0
+  # Only the shape the console writes, and an ID as config set takes it.
+  app_id="$(jq -r '.app_id | strings' <"$file" 2>/dev/null || true)"
+  if [ -z "$app_id" ] || [[ "$app_id" == *[[:cntrl:]]* ]] \
+    || ! "$FP" config check ENABLE_BANKING_APP_ID - <<<"$app_id" >/dev/null 2>&1; then
+    result "$id" refused "Not an application ID: one looks like 1b4e28ba-2fa1-11d2-883f-0016d3cca427."
+    return 1
+  fi
+  result "$id" running "Asking Enable Banking about the application."
+  write_status
+  child bank "$app_id" || rc=$?
+  bank_result "$id" "$rc" "Saved."
+  return 1
+}
+
+# bank_result <id> <rc> <what it did>: exit 2 changed nothing; any other, part of it.
+bank_result() {
+  if [ "$2" -eq 0 ]; then
+    result "$1" applied "${MESSAGE:-$3}"
+  elif [ "$2" -eq 2 ]; then
+    result "$1" refused "${MESSAGE:-It changed nothing; journalctl -u firefly-pocket-console says why.}"
+  else
+    result "$1" failed "${MESSAGE:-It stopped; journalctl -u firefly-pocket-console says where.}"
+  fi
+}
+
+# apply_finish <id> <file>: 1, always: it starts the console again itself.
+apply_finish() {
+  local id="$1" out
+  out="$("$FP" config unset SETUP_CODE 2>&1)" || { result "$id" failed "${out#FATAL: }"; return 1; }
+  result "$id" applied "Setup is finished: the setup code works no more."
+  write_status
+  # Without the code, the console only says where things are.
+  if ! out="$(compose up -d --no-build --no-deps console 2>&1)"; then
+    printf '%s\n' "$out" >&2
+    result "$id" failed "The setup code is gone, but the console did not start again without it. On the server: docker compose --project-directory compose logs console"
   fi
   return 1
 }
@@ -288,6 +413,38 @@ cmd_account() {
   compose up -d --no-build --remove-orphans || die "Not every service started; the journal has why (journalctl -u firefly-pocket-console)"
   out="$(smoke_test)" || die "${out^}"
   ok "$out"
+}
+
+# console.sh _bank_key: apply_bank_key's work, in a process of its own.
+cmd_bank_key() {
+  local dir
+  # shellcheck source=lib.sh
+  source "$REPO_ROOT/scripts/lib.sh"
+  dir="$(mktemp -d)"
+  # shellcheck disable=SC2064  # $dir is fixed now
+  trap "rm -rf '$dir'" EXIT
+  make_eb_key "$dir" || refuse "This server could not make the key: openssl failed. The journal has why (journalctl -u firefly-pocket-console)"
+  "$FP" config render >/dev/null
+  # The importer has the old key: it starts again with the new one, and no ID.
+  compose up -d --no-build importer \
+    || die "The key is made, but the importer did not start again with it; the journal has why (journalctl -u firefly-pocket-console)"
+  echo "DONE: A new key, and its certificate to upload with your application. The private key stays on this server."
+}
+
+# console.sh _bank <application ID>: apply_bank's work, in a process of its own.
+cmd_bank() {
+  local id="$1" notes
+  # shellcheck source=lib.sh
+  source "$REPO_ROOT/scripts/lib.sh"
+  [ -n "${ENABLE_BANKING_PRIVATE_KEY:-}" ] || refuse "This server has no key yet: make one first."
+  eb_check "$ENABLE_BANKING_PRIVATE_KEY" "$id" || refuse "$(eb_refusal)"
+  echo "Enable Banking accepts a request signed with this server's key for $id: $(eb_about)"
+  "$FP" config set --no-render ENABLE_BANKING_APP_ID - <<<"$id" >/dev/null
+  "$FP" config render >/dev/null
+  compose up -d --no-build importer \
+    || die "The ID is saved, but the importer did not start again with it; the journal has why (journalctl -u firefly-pocket-console)"
+  notes="$(eb_notes | paste -sd' ' -)"
+  echo "DONE: Saved: Enable Banking accepts a request signed with this server's key for $(eb_about). ${notes:+$notes }Link a bank from Firefly Pocket: Bank connections."
 }
 
 cmd_apply() {
@@ -369,6 +526,9 @@ case "${1:-}" in
   status) write_status ;;
   install) cmd_install ;;
   _account) cmd_account "${2:?}" ;;
+  _bank_key) cmd_bank_key ;;
+  _bank) cmd_bank "${2:?}" ;;
+  _names) cmd_names ;;
   *)
     sed -n '3,9s/^# \{0,1\}//p' "${BASH_SOURCE[0]}" >&2
     exit 2

@@ -20,26 +20,29 @@
 #   start        every service started (by the deploy agent, once it runs), and each
 #                name's certificate checked
 #   bank         Enable Banking: a key and certificate made here for the application
-#                you register, then its ID, checked with a signed request
+#                you register, then its ID, checked with a signed request (bank.sh,
+#                which the console's bank step uses too)
 #   suggestions  an Anthropic or Gemini key, checked by asking for the model
 #   alerts       an ntfy topic made here and tested; healthchecks.io checks made with its API key
 #   backups      a restic repository, opened or created; its password shown to keep
 #   updates      the deploy agent (scripts/install-deploy-agent.sh), which keeps this
 #                server on master and installs the nightly jobs
+#   finish       ends setup web's setup code, if there is one (below)
 #
 # The full run starts the stack once the account exists, so nothing is public
-# before then, and again at the end with every answer. Answers are read from stdin
-# when it is not a terminal, one line each, which is how the boot test runs it
-# (scripts/boot-test.sh).
+# before then, and again at the end with every answer; then it finishes setup.
+# Answers are read from stdin when it is not a terminal, one line each, which is
+# how the boot test runs it (scripts/boot-test.sh).
 #
 # setup web asks only for the domain and your email, which Caddy needs, makes a
 # setup code and starts Caddy and the Firefly Pocket Console alone. Until Firefly
 # III has its account, every name then shows only the console, at
 # https://admin.<domain>, which asks for that code (the Caddyfile's setup gate).
-# Its pages are the domain and you steps, then the account and start steps; the
-# rest is this wizard's for now. What the console saves, scripts/console.sh
-# applies: setup web installs the systemd unit that runs it, unless
-# FIREFLY_POCKET_NO_SYSTEMD is set (CI).
+# Its pages are the domain and you steps, then the account and start steps, then
+# the bank step; the rest is this wizard's for now. The code works until setup
+# finishes: the console's Finish, or this wizard's full run or finish step, ends
+# it. What the console saves, scripts/console.sh applies: setup web installs the
+# systemd unit that runs it, unless FIREFLY_POCKET_NO_SYSTEMD is set (CI).
 
 set -euo pipefail
 shopt -s inherit_errexit
@@ -50,12 +53,14 @@ CONFIG="$COMPOSE_DIR/config.json"
 # shellcheck source=host.sh
 source "$REPO_ROOT/scripts/host.sh"
 FP="$REPO_ROOT/scripts/firefly-pocket"
-EB_CERT="$COMPOSE_DIR/secrets/eb/application.crt"
 STEPS="domain you account start bank suggestions alerts backups updates"
-# The account and the apps' tokens (TOKENS, firefly_up, make_tokens), shared
-# with the console's account step.
+# The account and the apps' tokens (TOKENS, firefly_up, make_tokens), and
+# Enable Banking's key and check (EB_CERT, make_eb_key, eb_check), shared with
+# the console's steps.
 # shellcheck source=account.sh
 source "$REPO_ROOT/scripts/account.sh"
+# shellcheck source=bank.sh
+source "$REPO_ROOT/scripts/bank.sh"
 
 # Answers come from the terminal, or else from stdin, which then moves to fd 3:
 # no command the wizard runs can read an answer meant for a later question.
@@ -431,8 +436,16 @@ make_setup_code() {
 step_web() {
   heading "Setup in the browser"
   if has IMPORTER_FIREFLY_TOKEN 2>/dev/null; then
-    ok "setup is finished: Firefly III has its account, so the console has nothing to set up"
-    say "Change an answer with scripts/firefly-pocket setup <step> ($STEPS)."
+    if ! has SETUP_CODE; then
+      ok "setup is finished: Firefly III has its account and there is no setup code, so the console has nothing to set up"
+      say "Change an answer with scripts/firefly-pocket setup <step> ($STEPS)."
+      return 0
+    fi
+    reload
+    heading "Open https://$ADMIN_HOSTNAME"
+    say "and enter the setup code:" "" "    $SETUP_CODE" "" \
+        "Firefly III has its account, so every name is open; the console has the bank connection" \
+        "left, then Finish, which ends this code. scripts/firefly-pocket setup finish ends it here."
     return 0
   fi
   say "The console asks for the rest of the server and makes your Firefly III account, at" \
@@ -461,8 +474,8 @@ step_web() {
 
   heading "Open https://$ADMIN_HOSTNAME"
   say "and enter the setup code:" "" "    $SETUP_CODE" "" \
-      "Run this again to see it. It works until your Firefly III account exists, which the console" \
-      "makes. Then scripts/firefly-pocket setup for the rest: Enter keeps what the console saved."
+      "Run this again to see it. It works until setup is finished: the console's last page ends it." \
+      "Then scripts/firefly-pocket setup for the rest: Enter keeps what the console saved."
   if [ "${#SKIPPED[@]}" -gt 0 ]; then
     say "" "Left for later:"
     printf '     - %s\n' "${SKIPPED[@]}"
@@ -470,19 +483,11 @@ step_web() {
 }
 
 # ----------------------------------------------------------------- bank ---
-# A key for a new application, made here, and the certificate to upload with it.
-# The private key never leaves this server: it goes into the store, the
-# certificate (public) into compose/secrets/eb/.
-make_eb_key() {
-  local b64
-  openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:4096 -out "$WORK/eb.pem" 2>/dev/null
-  openssl req -new -x509 -key "$WORK/eb.pem" -days 3650 -subj "/CN=$NEXT_HOSTNAME" -out "$WORK/eb.crt" 2>/dev/null
-  b64="$(grep -v -- '-----' "$WORK/eb.pem" | tr -d '\n\r')"
-  rm -f "$WORK/eb.pem"
-  put ENABLE_BANKING_PRIVATE_KEY "$b64" || die "the new key does not pass its check"
-  ! has ENABLE_BANKING_APP_ID || drop ENABLE_BANKING_APP_ID
-  mkdir -p "$(dirname "$EB_CERT")"
-  install -m 644 "$WORK/eb.crt" "$EB_CERT"
+# A key for a new application, made here, and the certificate to upload with it
+# (bank.sh). The private key never leaves this server: it goes into the store,
+# the certificate (public) into compose/secrets/eb/.
+new_eb_key() {
+  make_eb_key "$WORK" || die "openssl could not make the key and its certificate"
   reload
 }
 
@@ -498,13 +503,15 @@ step_bank() {
     SKIPPED+=("bank import: scripts/firefly-pocket setup bank")
     return 0
   fi
-  if has ENABLE_BANKING_PRIVATE_KEY && [ ! -f "$EB_CERT" ]; then
+  if has ENABLE_BANKING_PRIVATE_KEY && ! eb_cert_matches "${ENABLE_BANKING_PRIVATE_KEY:-}"; then
     say "Its key was set by hand (scripts/set-eb-key.sh), for an application of its own."
-    if ! confirm "Keep it?" y; then make_eb_key; fi
+    if ! confirm "Keep it?" y; then new_eb_key; fi
   elif ! has ENABLE_BANKING_PRIVATE_KEY; then
-    make_eb_key
+    new_eb_key
   fi
-  if [ -f "$EB_CERT" ] && ! has ENABLE_BANKING_APP_ID; then
+  if eb_cert_matches "${ENABLE_BANKING_PRIVATE_KEY:-}" && ! has ENABLE_BANKING_APP_ID; then
+    local urls
+    mapfile -t urls < <(eb_redirect_urls | sed 's/^/      /')
     say "" "In Enable Banking's control panel, register a new application:" \
         "  - Environment: production. A sandbox application only ever sees a mock bank." \
         "  - Its public key: upload this certificate, made here for it (the private key stays on this server)," \
@@ -512,14 +519,13 @@ step_bank() {
         "    copied to your computer with" \
         "      scp $(id -un)@${FIREFLY_HOSTNAME}:$EB_CERT ." \
         "  - Redirect URLs, both:" \
-        "      https://$NEXT_HOSTNAME/eb-callback" \
-        "      https://$IMPORT_HOSTNAME/eb-callback" \
+        "${urls[@]}" \
         "  - Privacy policy https://$LEGAL_HOSTNAME/privacy, terms https://$LEGAL_HOSTNAME/terms" \
         "  - Then activate it by linking your own accounts (restricted mode, free for personal use)." \
         "The certificate, if you would rather paste it:"
     sed 's/^/     /' "$EB_CERT"
   fi
-  local id kept="${ENABLE_BANKING_APP_ID:-}" pem="$WORK/check.pem"
+  local id kept="${ENABLE_BANKING_APP_ID:-}" note
   while :; do
     if [ -n "$kept" ]; then ask "Application ID (Enter keeps it)" "$kept"; else ask "Application ID (Enter to skip)"; fi
     id="$ANSWER"
@@ -529,20 +535,16 @@ step_bank() {
       return 0
     fi
     "$FP" config check ENABLE_BANKING_APP_ID "$id" 2>/dev/null || { problem "an application ID looks like 1b4e28ba-2fa1-11d2-883f-0016d3cca427"; continue; }
-    # The key as the importer rebuilds it from the store, for set-eb-key.sh's
-    # signed request. set-eb-key.sh keeps the ID before it asks.
-    { echo "-----BEGIN PRIVATE KEY-----"; fold -w64 <<<"$ENABLE_BANKING_PRIVATE_KEY"; echo "-----END PRIVATE KEY-----"; } > "$pem"
-    if FROM_SETUP=1 "$REPO_ROOT/scripts/set-eb-key.sh" "$pem" "$id" 2>&1 | sed 's/^/   /'; then
-      rm -f "$pem"
+    # Kept only once Enable Banking takes a request signed with the key for it.
+    if eb_check "${ENABLE_BANKING_PRIVATE_KEY:-}" "$id"; then
+      put ENABLE_BANKING_APP_ID "$id" || die "config set refused the ID it had checked"
       reload
-      ok "Enable Banking accepts a request signed with this key: link a bank from Firefly Pocket, Bank connections"
+      ok "Enable Banking accepts a request signed with this key for $(eb_about)"
+      while IFS= read -r note; do problem "$note"; done < <(eb_notes)
+      ok "link a bank from Firefly Pocket: Bank connections"
       return 0
     fi
-    rm -f "$pem"
-    if [ -n "$kept" ]; then put ENABLE_BANKING_APP_ID "$kept"; else drop ENABLE_BANKING_APP_ID; fi
-    reload
-    problem "not confirmed (above). With HTTP 000 Enable Banking did not answer; with any other, the ID is not" \
-            "that of the application registered with this key's certificate"
+    problem "$(eb_refusal)"
     if ! confirm "Try another ID?" y; then
       SKIPPED+=("bank import: scripts/firefly-pocket setup bank")
       return 0
@@ -769,6 +771,21 @@ step_updates() {
   fi
 }
 
+# ---------------------------------------------------------------- finish ---
+# Setup web's code works until setup is finished: from then on the console has
+# no say, until it signs in with Firefly III (Setup UI step 8). It is started
+# again without it.
+step_finish() {
+  has SETUP_CODE || return 0
+  has IMPORTER_FIREFLY_TOKEN || die "the account comes first: scripts/firefly-pocket setup account, or the console's"
+  heading "Finish"
+  drop SETUP_CODE
+  reload
+  "$FP" console status
+  compose up -d --no-build --no-deps console
+  ok "setup is finished: the console's setup code works no more"
+}
+
 summary() {
   heading "Firefly Pocket is set up"
   say "Firefly III      https://$FIREFLY_HOSTNAME" \
@@ -795,7 +812,7 @@ case "${1:-}" in
   "")
     say "Firefly Pocket setup: a few questions, each checked as you answer. Run it again to change" \
         "an answer; Enter keeps what is there."
-    for step in domain you account start bank suggestions alerts backups start updates; do
+    for step in domain you account start bank suggestions alerts backups start updates finish; do
       "step_$step"
     done
     summary
@@ -805,7 +822,7 @@ case "${1:-}" in
     "step_$1"
     [ "$1" = domain ] && [ ! -f "$COMPOSE_DIR/.env" ] || step_start
     ;;
-  start | updates)
+  start | updates | finish)
     [ -f "$CONFIG" ] || die "nothing is set up yet: run scripts/firefly-pocket setup"
     "step_$1"
     ;;
@@ -813,7 +830,7 @@ case "${1:-}" in
     step_web
     ;;
   *)
-    sed -n '3,42s/^# \{0,1\}//p' "${BASH_SOURCE[0]}" >&2
+    sed -n '3,45s/^# \{0,1\}//p' "${BASH_SOURCE[0]}" >&2
     exit 2
     ;;
 esac
