@@ -22,7 +22,8 @@
 #   5. the deploy's smoke test, and the token against Firefly III's API and
 #      through Firefly Pocket's, which calls Firefly III on the internal network
 #   6. the legal pages through Caddy: on their host, and under /legal/ on
-#      Firefly Pocket's
+#      Firefly Pocket's; and a bank consent's callback reaching the importer
+#      fork on Firefly Pocket's host and on the importer's
 
 set -euo pipefail
 
@@ -146,5 +147,22 @@ for url in "https://$LEGAL_HOSTNAME/" "https://$LEGAL_HOSTNAME/privacy" "https:/
 done
 [[ "$(through_caddy "https://$NEXT_HOSTNAME/")" == *'type="module"'* ]] || { echo "the app is not at https://$NEXT_HOSTNAME/"; exit 1; }
 echo "the legal pages render on both hosts, and the app is still the app"
+
+# A bank consent coming back, with a state the fork never handed out: the
+# fork refuses it by sending the browser to Firefly Pocket's bank page. That
+# redirect, and not Pocket's own page, proves Caddy routed it to the fork. On
+# Pocket's host, where links from Firefly Pocket now come back, and on the
+# importer's, which still works until Hostnames and routing step 8.
+echo "==> a bank consent coming back reaches the importer fork, on both hosts"
+for host in "$NEXT_HOSTNAME" "$IMPORT_HOSTNAME"; do
+  went="$(docker run --rm --network "$DOCKER_NETWORK" "$CURL_IMAGE" -sS -k --max-time 30 \
+    --connect-to ::caddy:443 -o /dev/null -w '%{http_code} %{redirect_url}' \
+    "https://$host/eb-callback?state=fx-0123456789abcdef&code=boot-test")"
+  if [[ "$went" != "302 https://$NEXT_HOSTNAME/bank-connections"*"reason=invalid_state"* ]]; then
+    echo "https://$host/eb-callback did not reach the importer fork: $went"
+    exit 1
+  fi
+done
+echo "the fork answered the callback on both hosts"
 
 echo "==> booted and checked"

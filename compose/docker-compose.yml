@@ -321,13 +321,17 @@ services:
       FIREFLYX_SUGGESTER_TOKEN: ${SUGGESTER_TRIGGER_TOKEN:?run scripts/gen-secrets.sh}
       FIREFLYX_BASE_CONFIG: /fireflyx/config/importer-base.json
       # Linking or re-authenticating a bank from Firefly Pocket. Enable Banking
-      # only redirects to the URL registered for the app, which is upstream's
-      # own callback; Caddy sends the fork's ("fx-" state) callbacks to the
-      # fork. The user then lands back in Firefly Pocket, on its
+      # redirects only to a URL registered for the app: this one, on Firefly
+      # Pocket's host, where Caddy sends the fork's ("fx-" state) callbacks to
+      # the fork. Links started in the importer's own UI keep coming back to
+      # its host. The user then lands back in Firefly Pocket, on its
       # /bank-connections pages — the only place the callback ever redirects
-      # to. The fork still calls the setting FIREFLYX_PICO_URL; Hostnames and
-      # routing renames it.
-      FIREFLYX_CALLBACK_URL: https://${IMPORT_HOSTNAME}/eb-callback
+      # to. The fork still calls that setting FIREFLYX_PICO_URL; Hostnames and
+      # routing step 5 renames it.
+      FIREFLY_POCKET_CALLBACK_URL: https://${NEXT_HOSTNAME}/eb-callback
+      # The old name, for importer builds older than the new one. Drop it
+      # with step 5.
+      FIREFLYX_CALLBACK_URL: https://${NEXT_HOSTNAME}/eb-callback
       FIREFLYX_PICO_URL: https://${NEXT_HOSTNAME}
       # Banks book late; duplicate detection discards the overlap.
       FIREFLYX_LOOKBACK_DAYS: ${IMPORT_LOOKBACK_DAYS:-5}
