@@ -3,8 +3,8 @@
 # locally before pushing (AGENTS.md "Checks").
 #
 # One check per job. Their names (shellcheck, compose, suggester, boot,
-# bundle) are what master's ruleset requires, so rename them only together
-# with it.
+# bundle, upgrade (stable), upgrade (latest)) are what master's ruleset
+# requires, so rename them only together with it.
 name: CI
 
 on:
@@ -98,3 +98,24 @@ jobs:
         run: |
           scripts/make-bundle.sh "$RUNNER_TEMP/bundle"
           cat "$RUNNER_TEMP/bundle/release.json"
+
+  # A published bundle booted, then upgraded to this commit the way a deploy
+  # does it, and checked again (Release pipeline step 8): from stable, what new
+  # installs run, and from latest, what your server runs, so the very upgrade
+  # this merge would cause there. Before the first release, stable passes with
+  # a note.
+  upgrade:
+    name: upgrade (${{ matrix.from }})
+    strategy:
+      fail-fast: false
+      matrix:
+        from: [stable, latest]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Boot ${{ matrix.from }} and upgrade it to this commit
+        env:
+          FROM: ${{ matrix.from }}
+        run: scripts/upgrade-test.sh
