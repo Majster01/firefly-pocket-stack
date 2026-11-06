@@ -35,8 +35,9 @@ variable "server_type" {
 
     Alternatives checked against live nbg1 pricing:
       cpx11  same price, but only 2 GB RAM — too tight for this stack
-      cax11  ARM, same specs, EUR 0.50/mo more. Every image here does publish
-             arm64, so it works; it is simply no longer the cheaper option.
+      cax11  ARM, same specs, EUR 0.50/mo more. Every image in the stack is
+             published for arm64, the three this project builds included, so
+             it works; it is simply no longer the cheaper option.
   EOT
   type        = string
   default     = "cx23"

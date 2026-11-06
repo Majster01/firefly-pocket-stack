@@ -2,8 +2,9 @@
 # The suggester is the one image this repository makes, and it is made here,
 # not on the server:
 #
-#   1. image   ghcr.io/majster01/firefly-pocket-suggester:sha-<commit>, pushed
-#              only after its tests pass inside it
+#   1. image   ghcr.io/majster01/firefly-pocket-suggester:sha-<commit>, for
+#              linux/amd64 and linux/arm64, pushed only after its tests pass
+#              inside it on both
 #   2. deploy  "Pin fork image" sets that tag in compose on a pin PR that merges
 #              itself once CI is green, as for the forks; the server deploys
 #              master.
@@ -47,26 +48,18 @@ jobs:
       - id: tag
         run: echo "tag=sha-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
 
-      # The server is a cx23 (x86). Release pipeline step 9 adds linux/arm64.
-      - name: Build
-        env:
-          TAG: ${{ steps.tag.outputs.tag }}
-        run: |
-          docker build --platform linux/amd64 \
-            --label org.opencontainers.image.source="https://github.com/$GITHUB_REPOSITORY" \
-            --label org.opencontainers.image.revision="$GITHUB_SHA" \
-            --label org.opencontainers.image.description="Category suggester of firefly-pocket-stack" \
-            -t "$IMAGE:$TAG" services/category-suggester
+      # The server is a cx23 (x86); an ARM server runs the same tag, as the
+      # image is published for both (Release pipeline step 9). On this runner
+      # linux/arm64 builds and runs under QEMU.
+      - uses: docker/setup-qemu-action@v4
+        with:
+          platforms: arm64
+      - uses: docker/setup-buildx-action@v4
 
       # The same run as CI's suggester check, so nothing untested is pushed even
       # when master moved without a PR.
-      - name: Run the tests in it
-        env:
-          TAG: ${{ steps.tag.outputs.tag }}
-        run: |
-          docker run --rm --network none \
-            -v "$PWD/services/category-suggester/tests:/app/tests:ro" \
-            --entrypoint python "$IMAGE:$TAG" -m unittest
+      - name: Build it and run the tests in it, on both platforms
+        run: scripts/suggester-test.sh
 
       - uses: docker/login-action@v3
         with:
@@ -74,10 +67,18 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # Both platforms under the one tag. The builder still holds the layers the
+      # tests just ran in, so nothing is built again.
       - name: Push
         env:
           TAG: ${{ steps.tag.outputs.tag }}
-        run: docker push "$IMAGE:$TAG"
+        run: |
+          docker buildx build --push --platform linux/amd64,linux/arm64 \
+            --label org.opencontainers.image.source="https://github.com/$GITHUB_REPOSITORY" \
+            --label org.opencontainers.image.revision="$GITHUB_SHA" \
+            --label org.opencontainers.image.description="Category suggester of firefly-pocket-stack" \
+            -t "$IMAGE:$TAG" services/category-suggester
+          docker buildx imagetools inspect "$IMAGE:$TAG"
 
   # GITHUB_TOKEN may start a workflow_dispatch run, so this needs no secret.
   pin:

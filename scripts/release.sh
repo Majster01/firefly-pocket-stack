@@ -8,9 +8,11 @@
 #   2. the canary gate: only a commit your server has run, with a successful
 #      deploy, for 24 hours (Release pipeline step 7)
 #   3. the commit's published bundle, ghcr.io/majster01/firefly-pocket-stack:
-#      sha-<commit>, gets the tags X.Y.Z, X.Y and stable, by digest: stable is
-#      the very bundle that ran as latest
-#   4. the git tag vX.Y.Z, and a GitHub release that lists the components,
+#      sha-<commit>, with the signature Publish bundle gave it on master
+#      (Release pipeline step 9)
+#   4. that bundle gets the tags X.Y.Z, X.Y and stable, by digest: stable is
+#      the very bundle that ran as latest, and carries the same signature
+#   5. the git tag vX.Y.Z, and a GitHub release that lists the components,
 #      read from the bundle's own release.json, and the changes
 #
 #     scripts/release.sh <patch|minor|major> [<commit>]   # commit: default master's head
@@ -22,8 +24,8 @@
 # migrations included; patch, fixes only.
 #
 # Needs the history with tags, gh logged in (it reads the commit's statuses;
-# for a release, contents: write) and docker buildx logged in to ghcr.io with
-# push rights (not for a dry run).
+# for a release, contents: write), cosign, and docker buildx logged in to
+# ghcr.io with push rights (not for a dry run).
 
 set -euo pipefail
 
@@ -116,10 +118,24 @@ if ! [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
   exit 1
 fi
 echo "    bundle $IMAGE:sha-$short = $digest"
-
-# The release.json inside the bundle: what is actually being released.
 work="$(mktemp -d)"
 trap 'rm -rf "$work"; docker rm -f "release-$short" >/dev/null 2>&1 || true' EXIT
+
+# Signed by Publish bundle on master, keyless: the certificate names the
+# workflow, and Sigstore's transparency log holds the signing. A bundle made
+# anywhere else, or pushed before signing began, is refused.
+repo="$(gh api 'repos/{owner}/{repo}' --jq .full_name)"
+identity="https://github.com/$repo/.github/workflows/publish.yml@refs/heads/master"
+issuer=https://token.actions.githubusercontent.com
+if ! cosign verify "$IMAGE@$digest" --certificate-identity "$identity" \
+    --certificate-oidc-issuer "$issuer" >/dev/null 2>"$work/cosign.log"; then
+  echo "FATAL: the bundle of $short has no valid signature from $identity:" >&2
+  sed 's/^/       /' "$work/cosign.log" >&2
+  exit 1
+fi
+echo "    signed by $identity"
+
+# The release.json inside the bundle: what is actually being released.
 docker create --name "release-$short" "$IMAGE@$digest" none >/dev/null
 docker cp "release-$short:/release.json" "$work/release.json"
 build="$(jq -r .version "$work/release.json")"
@@ -131,6 +147,14 @@ build="$(jq -r .version "$work/release.json")"
 # -------------------------------------------------------------------- notes ---
 {
   echo "Bundle \`$IMAGE:$version\` (\`$digest\`), the build \`$build\` of $short. $canary"
+  echo
+  echo "Signed by Publish bundle on master. To check it:"
+  echo
+  echo '```'
+  echo "cosign verify $IMAGE:$version \\"
+  echo "  --certificate-identity $identity \\"
+  echo "  --certificate-oidc-issuer $issuer"
+  echo '```'
   echo
   echo "| Service | Image | Tag | Migrates a database |"
   echo "| --- | --- | --- | --- |"
