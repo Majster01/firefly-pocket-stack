@@ -60,7 +60,10 @@
 #      agent refuses a request with the old code
 #   8. the account step again, with no input: it must ask nothing and keep every token
 #   9. each token against Firefly III's API and through Firefly Pocket's, which
-#      calls Firefly III on the internal network
+#      calls Firefly III on the internal network. Then the console, setup
+#      finished, signs you in with Firefly III, as a browser does: its own login
+#      page with the account's password, its approval page, and back to the
+#      console, which shows the server to its owner
 #  10. the legal pages through Caddy: on their host, and under /legal/ on
 #      Firefly Pocket's; and a bank consent's callback reaching the importer
 #      fork on Firefly Pocket's host and on the importer's
@@ -618,6 +621,72 @@ echo "==> each app's token against Firefly III's API, and through Firefly Pocket
 for token in "${tokens[@]}"; do
   token_check "$token"
 done
+
+echo "==> after setup, the console signs its owner in with Firefly III"
+[ -n "$(jq -r '.signin.client_id // empty' compose/console/status/status.json)" ] \
+  || fail "the console has no sign-in client: $(jq -c .signin compose/console/status/status.json)"
+[ -n "$(scripts/firefly-pocket config get CONSOLE_CLIENT_ID)" ] || fail "CONSOLE_CLIENT_ID was not kept"
+# A browser, as far as Caddy and Firefly III can tell: every *.localhost name is
+# this machine, Caddy's own CA is not checked, and redirects are followed by
+# hand. The password comes on stdin.
+cat > "$jar/browser.py" <<'BROWSER'
+import html, http.cookiejar, re, socket, ssl, sys, urllib.parse, urllib.request
+
+admin, firefly, email = sys.argv[1:4]
+password = sys.stdin.readline().rstrip("\n")
+resolve = socket.getaddrinfo
+socket.getaddrinfo = lambda host, *a, **k: resolve("127.0.0.1" if host.endswith(".localhost") else host, *a, **k)
+context = ssl.create_default_context()
+context.check_hostname = False
+context.verify_mode = ssl.CERT_NONE
+
+
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *a, **k):
+        return None
+
+
+opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), urllib.request.HTTPSHandler(context=context),
+                                     urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()), NoRedirect)
+
+
+def go(url, form=None):
+    """The page a browser ends up on, and its URL, following every redirect."""
+    for _ in range(10):
+        data = urllib.parse.urlencode(form).encode() if form is not None else None
+        try:
+            r = opener.open(urllib.request.Request(url, data=data))
+            status, headers, body = r.status, r.headers, r.read().decode()
+        except urllib.error.HTTPError as e:
+            status, headers, body = e.code, e.headers, e.read().decode()
+        if status in (301, 302, 303) and headers.get("Location"):
+            url, form = urllib.parse.urljoin(url, headers["Location"]), None
+            print("->", url.split("?")[0])
+            continue
+        return status, body, url
+    sys.exit("too many redirects")
+
+
+status, page, url = go(f"https://{admin}/signin")
+if not url.startswith(f"https://{firefly}/login"):
+    sys.exit(f"the sign-in did not reach Firefly III's login page: {status} {url}")
+token = re.search(r'name="_token" value="([^"]+)"', page).group(1)
+status, page, url = go(f"https://{firefly}/login", {"_token": token, "email": email, "password": password})
+if url.startswith(f"https://{firefly}/oauth/authorize"):
+    # Firefly III asks once whether to let the console in: the first form approves.
+    approve = page.split("</form>")[0]
+    form = {re.search(r'name="([^"]+)"', i).group(1): html.unescape(re.search(r'value="([^"]*)"', i).group(1))
+            for i in re.findall(r"<input[^>]*>", approve) if 'name="' in i and 'value="' in i}
+    status, page, url = go(f"https://{firefly}/oauth/authorize", form)
+print(status, url)
+print("SIGNED IN AS " + email if f"Signed in with Firefly III as {email}" in page else page[-1500:])
+BROWSER
+said="$(python3 "$jar/browser.py" "$ADMIN_HOSTNAME" "$FIREFLY_HOSTNAME" ci@example.com <<<"$password")" \
+  || fail "the sign-in stopped: $said"
+printf '%s\n' "$said"
+grep -qx 'SIGNED IN AS ci@example.com' <<<"$said" || fail "the console did not sign its owner in"
+grep -q '/oauth/callback' <<<"$said" || fail "the sign-in did not come back through the console's callback"
+echo "the console signs its owner in with Firefly III, with no secret of its own"
 
 # By name through Caddy, as a browser asks: its own CA for *.localhost (-k),
 # from this network. The legal pages render on their host and under /legal/
