@@ -417,7 +417,9 @@ page="$(ask_console "$request")"
 echo "the key stays on the server, its certificate is handed out, and only the right ID is kept"
 
 echo "==> the console's suggestions and alerts: each kept once it works"
-# post <path> <form fields...>: the console's request, applied; its state.
+# post <path> <form fields...>: the console's request, applied. Not in a
+# subshell: request is the one it made, posted what became of it, and said what
+# the server said.
 post() {
   local path="$1" went field data=(--data '')
   shift
@@ -426,24 +428,32 @@ post() {
   [[ "$went" =~ ^303\ ($admin/requests/[0-9a-f]{32})$ ]] || fail "$path got \"$went\""
   request="${BASH_REMATCH[1]}"
   scripts/firefly-pocket console apply >/dev/null
-  state "${request##*/}"
+  posted="$(state "${request##*/}")"
+  said="$(jq -r --arg id "${request##*/}" '.requests[$id].message // ""' compose/console/status/status.json)"
 }
 heard() { curl -fsS "$outside/log" | jq -r "$1"; }
-[ "$(post /suggestions provider=anthropic "key=sk-ant-api03-not-$anthropic_key" model=)" = refused ] \
-  || fail "a key the provider does not take was not refused"
+post /suggestions provider=anthropic "key=sk-ant-api03-not-$anthropic_key" model=
+[ "$posted" = refused ] || fail "a key the provider does not take: $posted: $said"
+[[ "$said" == *"invalid x-api-key"* ]] || fail "the server does not say why the key was refused: $said"
 [[ "$(ask_console "$request")" == *"invalid x-api-key"* ]] || fail "the console does not say why the key was refused"
 scripts/firefly-pocket config has ANTHROPIC_API_KEY && fail "a key the provider refused was kept"
-[ "$(post /suggestions provider=anthropic "key=$anthropic_key" model=)" = applied ] || fail "the AI key: $(state "${request##*/}")"
+post /suggestions provider=anthropic "key=$anthropic_key" model=
+[ "$posted" = applied ] || fail "the AI key: $posted: $said"
 [ "$(scripts/firefly-pocket config get SUGGESTER_MODEL)" = claude-haiku-5-5 ] || fail "the model is not the default"
 [[ "$(ask_console "$admin/suggestions")" == *"…${anthropic_key: -4}"* ]] || fail "the console does not show the key's last four"
 topic="$outside/ntfy/firefly-pocket-boot-test"
-[ "$(post /alerts/ntfy "url=http://127.0.0.1:9/ntfy/nobody")" = refused ] || fail "a topic ntfy does not take was kept"
-[ "$(post /alerts/ntfy "url=$topic")" = applied ] || fail "the ntfy topic: $(state "${request##*/}")"
-[ "$(post /alerts/test)" = applied ] || fail "the test alert: $(state "${request##*/}")"
+post /alerts/ntfy "url=http://127.0.0.1:9/ntfy/nobody"
+[ "$posted" = refused ] || fail "a topic ntfy does not take: $posted: $said"
+post /alerts/ntfy "url=$topic"
+[ "$posted" = applied ] || fail "the ntfy topic: $posted: $said"
+post /alerts/test
+[ "$posted" = applied ] || fail "the test alert: $posted: $said"
 [ "$(heard '[.[] | select(.to == "/ntfy/firefly-pocket-boot-test")] | length')" = 2 ] \
   || fail "ntfy should have two test alerts: $(heard '.')"
-[ "$(post /alerts/healthchecks "key=x$healthchecks_key")" = refused ] || fail "a wrong healthchecks.io key was not refused"
-[ "$(post /alerts/healthchecks "key=$healthchecks_key")" = applied ] || fail "the checks: $(state "${request##*/}")"
+post /alerts/healthchecks "key=x$healthchecks_key"
+[ "$posted" = refused ] || fail "a wrong healthchecks.io key: $posted: $said"
+post /alerts/healthchecks "key=$healthchecks_key"
+[ "$posted" = applied ] || fail "the checks: $posted: $said"
 [ "$(heard '[.[] | select(.to == "healthchecks") | "\(.name) \(.schedule) \(.tz)"] | join(", ")')" \
   = "Firefly Pocket nightly 0 3 * * * Europe/Ljubljana, Firefly Pocket backup 0 2 * * * Europe/Ljubljana" ] \
   || fail "the checks are not the two, in the server's timezone: $(heard '.')"
