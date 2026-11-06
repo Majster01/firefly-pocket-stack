@@ -15,9 +15,10 @@ key for it. Then the AI key for suggestions, which the server keeps once the
 provider has the model for it, and the alerts: an ntfy topic, kept once a test
 alert gets through, and healthchecks.io's two checks, made with an API key the
 server does not keep. Then the offsite backup: a restic repository, made with
-a password this shows you once to keep, or one restic uses already. Saved keys
-are write-only: this shows their last four characters. Finish ends the setup
-code. Updates run over SSH for now, until the console takes that step over too.
+a password this shows you once to keep, or one restic uses already. Then
+updates: the deploy agent, which keeps the server on master and runs the
+nightly jobs. Saved keys are write-only: this shows their last four
+characters. Finish lists what each step left, and ends the setup code.
 
 It is built so that taking it over gains little:
 
@@ -158,10 +159,10 @@ STEPS = (
     ("Suggestions", "/suggestions"),
     ("Alerts", "/alerts"),
     ("Backups", "/backups"),
-    ("Updates", None),
+    ("Updates", "/updates"),
     ("Finish", "/finish"),
 )
-SERVER, ACCOUNT, BANK, SUGGESTIONS, ALERTS, BACKUPS, FINISH = 0, 1, 2, 3, 4, 5, 7
+SERVER, ACCOUNT, BANK, SUGGESTIONS, ALERTS, BACKUPS, UPDATES, FINISH = range(8)
 
 # Firefly III's minimum, which the agent checks again.
 MIN_PASSWORD = 16
@@ -180,14 +181,17 @@ OUTCOME = {
     "ntfy_test": ("Sent", "Not sent", "Sending a test alert"),
     "healthchecks": ("Made", "Not made", "Making the checks"),
     "backups": ("Saved", "Not saved", "Opening the repository"),
+    "updates": ("Turned on", "Not turned on", "Turning on the deploy agent"),
     "finish": ("Setup is finished", "Not finished", "Finishing"),
 }
 # The page each request goes back to, and the step after it once it is done.
 BACK = {"server": "/server", "account": "/account", "bank_key": "/bank", "bank": "/bank", "suggestions": "/suggestions",
-        "ntfy": "/alerts", "ntfy_test": "/alerts", "healthchecks": "/alerts", "backups": "/backups", "finish": "/finish"}
+        "ntfy": "/alerts", "ntfy_test": "/alerts", "healthchecks": "/alerts", "backups": "/backups", "updates": "/updates",
+        "finish": "/finish"}
 NEXT = {"server": ("/account", "Firefly III account"), "account": ("/bank", "Bank connection"),
         "bank": ("/suggestions", "Suggestions"), "suggestions": ("/alerts", "Alerts"), "ntfy": ("/backups", "Backups"),
-        "ntfy_test": ("/backups", "Backups"), "healthchecks": ("/backups", "Backups"), "backups": ("/finish", "Finish")}
+        "ntfy_test": ("/backups", "Backups"), "healthchecks": ("/backups", "Backups"), "backups": ("/updates", "Updates"),
+        "updates": ("/finish", "Finish")}
 
 # As scripts/config.sh checks an API key and a model, and the providers' defaults.
 API_KEY_RE = re.compile(r"[A-Za-z0-9._-]{16,}")
@@ -492,6 +496,8 @@ class Console:
             return self.save_alerts(req, path.rsplit("/", 1)[1])
         if path == "/backups":
             return self.save_backups(req) if post else self.backups_page(req)
+        if path == "/updates":
+            return self.save_updates(req) if post else self.updates_page(req)
         if path == "/finish":
             return self.save_finish(req) if post else self.finish_page(req)
         match = re.fullmatch(r"/requests/([0-9a-f]{32})", path)
@@ -1201,10 +1207,10 @@ class Console:
             saved_html = f"""
     <p class="good">This server backs up to <code>{esc(repository)}</code> each night.</p>
     <details{" open" if errors else ""}><summary>Another repository, or new keys</summary>{form}</details>"""
-            after = '<p><a class="button" href="/finish">Next: Finish</a></p>'
+            after = '<p><a class="button" href="/updates">Next: Updates</a></p>'
         else:
             saved_html = form
-            after = """<p>Without one, losing this server loses everything. <a href="/finish">Skip it for now</a>: on the
+            after = """<p>Without one, losing this server loses everything. <a href="/updates">Skip it for now</a>: on the
     server, <code>scripts/firefly-pocket setup backups</code> does it later.</p>"""
         body = f"""
 <div class="setup">
@@ -1269,6 +1275,54 @@ class Console:
             return self.backups_page(req, 400, values, errors)
         return self.hand_over(req, "backups", fields, self.backups_page)
 
+    # ------------------------------------------------------------ updates ---
+    def updates_page(self, req: Request, status: int = 200, note: str = "") -> Response:
+        state = read_status(self.status_file)
+        if not account_made(state):
+            return self.needs_account(UPDATES, "Updates", status)
+        kept = part(state, "updates")
+        origin = str(kept.get("origin") or "")
+        repository = f"<code>{esc(origin)}</code>" if origin else "the repository this server was installed from"
+        if kept.get("agent") is True:
+            now = f"""
+    <p class="good">The deploy agent is on: this server follows master of {repository}.</p>
+    <p class="quiet">To turn it off, on the server: <code>sudo systemctl disable --now fireflyx-deploy.timer</code>. Then
+    nothing runs on a schedule.</p>"""
+            after = '<p><a class="button" href="/finish">Next: Finish</a></p>'
+        else:
+            now = """
+    <p><span class="bad">Off:</span> nothing runs on a schedule, so no nightly import and no backup.</p>
+    <form method="post" action="/updates"><button type="submit">Turn on the deploy agent</button></form>
+    <p class="quiet">Its timer is a systemd unit, so the server's user needs sudo without a password, as a server made
+    from <code>terraform/cloud-init.yaml</code> has. Without it, on the server: <code>scripts/firefly-pocket setup
+    updates</code>, which asks for the password.</p>"""
+            after = """<p><a href="/finish">Skip it for now</a>: on the server, <code>scripts/firefly-pocket setup updates</code>
+    does it later.</p>"""
+        body = f"""
+<div class="setup">
+  {stepper(UPDATES, state)}
+  <section class="panel">
+    <h1>Updates</h1>
+    {note}
+    <p>The deploy agent keeps this server up to date. Every two minutes it looks at master of {repository}, and when it
+    has moved, deploys it: every image pulled first, and a backup that is shown to restore before Firefly III,
+    Postgres or the importer changes, as they migrate their databases. A failure alerts you.</p>
+    <p>It also runs the nightly jobs: the backup at 02:00, the bank import at 03:00, and on Sundays the restore tests,
+    from this server's copy and from the offsite one.</p>
+    {now}
+    <p class="quiet">Following a release channel (stable or latest) instead of master comes later.</p>
+    <h2>Next</h2>
+    {after}
+  </section>
+</div>"""
+        return self.page(status, "Updates", body, signed_in=True)
+
+    def save_updates(self, req: Request) -> Response:
+        state = read_status(self.status_file)
+        if not account_made(state):
+            return self.updates_page(req, 409)
+        return self.hand_over(req, "updates", {}, self.updates_page)
+
     # ------------------------------------------------------------- finish ---
     def finish_page(self, req: Request, status: int = 200, note: str = "") -> Response:
         state = read_status(self.status_file)
@@ -1307,6 +1361,10 @@ class Console:
         backups_html = (f"each night to <code>{esc(repository)}</code>" if repository else
                         '<span class="bad">on this server only:</span> losing it loses everything. '
                         "<code>scripts/firefly-pocket setup backups</code> does it later.")
+        updates_html = ("the deploy agent is on: this server follows master, and the nightly jobs run"
+                        if part(state, "updates").get("agent") is True else
+                        '<span class="bad">off: nothing runs on a schedule,</span> so no nightly import and no backup. '
+                        "<code>scripts/firefly-pocket setup updates</code> does it later.")
         body = f"""
 <div class="setup">
   {stepper(FINISH, state)}
@@ -1322,11 +1380,10 @@ class Console:
       <tr><th scope="row"><a href="/suggestions">Suggestions</a></th><td>{suggestions}</td></tr>
       <tr><th scope="row"><a href="/alerts">Alerts</a></th><td>{alerts_html}</td></tr>
       <tr><th scope="row"><a href="/backups">Backups</a></th><td>{backups_html}</td></tr>
+      <tr><th scope="row"><a href="/updates">Updates</a></th><td>{updates_html}</td></tr>
     </tbody></table>
-    <h2>Left for the server, over SSH</h2>
-    <p>Updates have no page here yet. On the server, before or after Finish:
-    <code>scripts/firefly-pocket setup updates</code> turns on the deploy agent. It also runs the nightly jobs: the
-    bank import, the backup and the restore tests. Until it is on, nothing runs on a schedule.</p>
+    <p class="quiet">Each step was applied as you saved it. To change one, open its page; after Finish, on the server:
+    <code>scripts/firefly-pocket setup &lt;step&gt;</code>.</p>
     <h2>Finish setup</h2>
     <p>Then the setup code works no more, and this console only says where things are, until it signs in with
     Firefly III.</p>
@@ -1367,7 +1424,8 @@ class Console:
                 links = 'This console starts again without the code: <a href="/">open it again</a> in a moment.'
             return self.page(200, done, f'<section class="narrow"><h1>{done}</h1><p>{message}</p><p>{links}</p></section>',
                              signed_in=True)
-        takes = {"account": "This takes a few minutes.", "backups": "This can take a minute."}.get(
+        takes = {"account": "This takes a few minutes.", "backups": "This can take a minute.",
+                 "updates": "This can take a minute."}.get(
             action, "This takes a few seconds.")
         if isinstance(result, dict):  # running: the server says how far it got
             if self.stale(result):
@@ -1458,7 +1516,8 @@ def next_step(state: dict) -> str:
     if not account_made(state):
         return "/account" if server_saved(state) else "/server"
     done = steps_done(state)
-    for step, path in ((BANK, "/bank"), (SUGGESTIONS, "/suggestions"), (ALERTS, "/alerts"), (BACKUPS, "/backups")):
+    for step, path in ((BANK, "/bank"), (SUGGESTIONS, "/suggestions"), (ALERTS, "/alerts"), (BACKUPS, "/backups"),
+                       (UPDATES, "/updates")):
         if step not in done:
             return path
     return "/finish"
@@ -1478,6 +1537,8 @@ def steps_done(state: dict) -> set[int]:
         done.add(ALERTS)
     if part(state, "backups").get("repository"):
         done.add(BACKUPS)
+    if part(state, "updates").get("agent") is True:
+        done.add(UPDATES)
     return done
 
 
@@ -1501,8 +1562,7 @@ def stepper(current: int, state: dict) -> str:
         aria = ' aria-current="step"' if i == current else ""
         label = f'<a href="{path}">{esc(name)}</a>' if path and i != current else esc(name)
         items += f'<li class="{kind}"{aria}>{label}</li>'
-    return f"""<nav class="steps" aria-label="Setup steps"><ol>{items}</ol>
-    <p class="quiet">Updates run over SSH for now.</p></nav>"""
+    return f'<nav class="steps" aria-label="Setup steps"><ol>{items}</ol></nav>'
 
 
 def password_field(name: str, label: str, error: str, help_text: str) -> str:

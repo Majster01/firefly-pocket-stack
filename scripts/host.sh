@@ -21,3 +21,6 @@ host_timezone() {
   [ -n "$tz" ] || tz="$(readlink /etc/localtime 2>/dev/null | sed -n 's#.*/zoneinfo/##p' || true)"
   printf '%s' "${tz:-Etc/UTC}"
 }
+
+# agent_on: whether the deploy agent runs this server (install-deploy-agent.sh).
+agent_on() { systemctl is-enabled --quiet fireflyx-deploy.timer 2>/dev/null; }

@@ -45,7 +45,10 @@
 #      restic repository on the runner, made with the password the console shows
 #      once, which opens it; an empty place refused as an existing repository, a
 #      wrong password refused, the right one kept. The password is in no file the
-#      console reaches
+#      console reaches. Then updates, with stand-ins for sudo and systemctl, as a
+#      runner's own would start the deploy agent here: refused without sudo that
+#      needs no password, then the deploy timer's units written for this checkout
+#      and the timer enabled
 #   6. the console's Finish: the setup code goes, the console starts again without
 #      it, and the code signs in no more
 #   7. scripts/firefly-pocket setup, as a new server runs it next, its answers
@@ -498,6 +501,45 @@ post /backups "repository=$repository" mode=existing "password=$shown"
 [[ "$said" == *"0 snapshots"* ]] || fail "the server does not say what is in the repository: $said"
 grep -rqF -- "$shown" compose/console && fail "the restic password is in a file the console reaches"
 echo "the repository is made with the password the console shows once, and kept once it opens"
+
+echo "==> the console's updates: the deploy agent turned on"
+# Stand-ins for sudo and systemctl: the runner's own would start the deploy
+# agent here, and it would reset this checkout to master. The units go to
+# $jar/systemd, and the timer is on once it is enabled.
+mkdir -p "$jar/fake" "$jar/systemd"
+cat > "$jar/fake/sudo" <<'FAKE'
+#!/usr/bin/env bash
+case "$1" in
+  -n) [ "${2:-}" = true ] && [ -z "${FAKE_NO_SUDO:-}" ] && exit 0; exit 1 ;;
+  tee) cat > "$FAKE_SYSTEMD/$(basename "$2")"; exit 0 ;;
+  systemctl) shift; exec systemctl "$@" ;;
+esac
+echo "stand-in sudo: not $*" >&2
+exit 1
+FAKE
+cat > "$jar/fake/systemctl" <<'FAKE'
+#!/usr/bin/env bash
+echo "$*" >> "$FAKE_SYSTEMD/calls"
+case "$*" in
+  "is-enabled --quiet fireflyx-deploy.timer") [ -f "$FAKE_SYSTEMD/enabled" ] ;;
+  "enable --now fireflyx-deploy.timer") touch "$FAKE_SYSTEMD/enabled" ;;
+esac
+FAKE
+chmod +x "$jar/fake/sudo" "$jar/fake/systemctl"
+[[ "$(ask_console "$admin/updates")" == *"Turn on the deploy agent"* ]] || fail "the updates page offers no deploy agent"
+PATH="$jar/fake:$PATH" FAKE_SYSTEMD="$jar/systemd" FAKE_NO_SUDO=1 post /updates
+[ "$posted" = refused ] || fail "the deploy agent without sudo: $posted: $said"
+[[ "$said" == *"no sudo without a password"* ]] || fail "the server does not say it needs sudo: $said"
+[ ! -e "$jar/systemd/enabled" ] || fail "the timer was enabled without sudo"
+PATH="$jar/fake:$PATH" FAKE_SYSTEMD="$jar/systemd" post /updates
+[ "$posted" = applied ] || fail "the deploy agent: $posted: $said"
+grep -qx "ExecStart=$REPO_ROOT/scripts/deploy.sh" "$jar/systemd/fireflyx-deploy.service" \
+  || fail "the deploy unit does not run this checkout's deploy.sh: $(cat "$jar/systemd/fireflyx-deploy.service")"
+grep -qx "User=$(id -un)" "$jar/systemd/fireflyx-deploy.service" || fail "the deploy unit does not run as the agent's user"
+grep -qx 'enable --now fireflyx-deploy.timer' "$jar/systemd/calls" || fail "the timer was not enabled"
+[ "$(jq -r .updates.agent compose/console/status/status.json)" = true ] || fail "the status does not say the agent is on"
+[[ "$(ask_console "$admin/updates")" == *"The deploy agent is on"* ]] || fail "the console does not say the agent is on"
+echo "the deploy agent is turned on only where sudo needs no password, for this checkout"
 
 echo "==> the console's Finish: the setup code goes"
 went="$(ask_console "${here[@]}" -o /dev/null -w '%{http_code} %{redirect_url}' --data '' "$admin/finish")"

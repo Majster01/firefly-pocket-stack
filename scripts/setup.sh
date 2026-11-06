@@ -28,7 +28,8 @@
 #   backups      a restic repository, opened or created; its password shown to keep
 #                (backups.sh, which the console's backups step uses too)
 #   updates      the deploy agent (scripts/install-deploy-agent.sh), which keeps this
-#                server on master and installs the nightly jobs
+#                server on master and installs the nightly jobs; the console's turns it
+#                on too, where sudo needs no password
 #   finish       ends setup web's setup code, if there is one (below)
 #
 # The full run starts the stack once the account exists, so nothing is public
@@ -41,11 +42,11 @@
 # III has its account, every name then shows only the console, at
 # https://admin.<domain>, which asks for that code (the Caddyfile's setup gate).
 # Its pages are the domain and you steps, then the account and start steps, then
-# the bank, suggestions, alerts and backups steps; updates is this wizard's for
-# now. The code works until setup finishes: the console's Finish, or this
-# wizard's full run or finish step, ends it. What the console saves,
-# scripts/console.sh applies: setup web installs the systemd unit that runs it,
-# unless FIREFLY_POCKET_NO_SYSTEMD is set (CI).
+# the bank, suggestions, alerts, backups and updates steps, and Finish. The code
+# works until setup finishes: the console's Finish, or this wizard's full run or
+# finish step, ends it. What the console saves, scripts/console.sh applies: setup
+# web installs the systemd unit that runs it, unless FIREFLY_POCKET_NO_SYSTEMD is
+# set (CI).
 
 set -euo pipefail
 shopt -s inherit_errexit
@@ -361,7 +362,6 @@ step_account() {
 }
 
 # ---------------------------------------------------------------- start ---
-agent_on() { systemctl is-enabled --quiet fireflyx-deploy.timer 2>/dev/null; }
 
 # check_certificates [<host>...]: every name, or those given.
 check_certificates() {
@@ -833,7 +833,7 @@ case "${1:-}" in
     step_web
     ;;
   *)
-    sed -n '3,48s/^# \{0,1\}//p' "${BASH_SOURCE[0]}" >&2
+    sed -n '3,49s/^# \{0,1\}//p' "${BASH_SOURCE[0]}" >&2
     exit 2
     ;;
 esac
