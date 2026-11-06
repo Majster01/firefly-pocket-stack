@@ -123,21 +123,3 @@ jobs:
         env:
           FROM: ${{ matrix.from }}
         run: scripts/upgrade-test.sh
-
-  # WIP: the importer fork's FireflyX tests, which its own CI does not run. Removed before merge.
-  fork-tests-wip:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@v5
-        with:
-          repository: Majster01/data-importer
-          ref: claude/fireflyx-release-pipeline-3x4v74
-      - uses: shivammathur/setup-php@v2
-        with:
-          php-version: '8.5'
-          extensions: bcmath, intl, sqlite3, pdo_sqlite
-          coverage: none
-      - run: git log --oneline -1
-      - run: composer install --no-interaction --prefer-dist --no-progress
-      - run: vendor/bin/phpunit tests/Feature/FireflyX
