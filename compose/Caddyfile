@@ -28,6 +28,16 @@
 	}
 }
 
+# The legal pages, from a read-only mount: on their own host, and under
+# /legal/ on Firefly Pocket's. try_files gives clean URLs, so /privacy serves
+# privacy.html; templates fills in the operator's details (see below).
+(legal_pages) {
+	root * /srv/legal
+	try_files {path} {path}.html {path}/index.html
+	templates
+	file_server
+}
+
 # Firefly III — has its own login. Registration closes by itself once the first
 # account exists (single_user_mode; there is no flag, see docker-compose.yml).
 {$FIREFLY_HOSTNAME} {
@@ -41,6 +51,10 @@
 # Its /api/internal/* (the Web Push receiver this stack's alert senders call,
 # the Firefly webhook) is for the internal network only; it answers here too,
 # so refuse it outright (it is also token-guarded).
+#
+# /legal/* is the legal site below, under this host too, so the app's host
+# can stand in for the legal one (Hostnames and routing step 3). Pocket's
+# service worker lets these paths through to here.
 {$NEXT_HOSTNAME} {
 	import security_headers
 
@@ -49,6 +63,11 @@
 	route {
 		handle @next_internal {
 			respond 404
+		}
+		# The pages link to each other relatively, so the index needs its slash.
+		redir /legal /legal/ 308
+		handle_path /legal/* {
+			import legal_pages
 		}
 		handle {
 			reverse_proxy next:80
@@ -101,19 +120,15 @@
 # Privacy policy and terms. Deliberately PUBLIC with no basic auth: Enable
 # Banking requires these URLs on a production application and a reviewer must
 # be able to read them. Nothing here is sensitive — it is static text only,
-# served from a read-only mount, with no application behind it.
-#
-# try_files gives clean URLs, so /privacy serves privacy.html.
+# served from a read-only mount, with no application behind it. The same
+# pages answer under /legal/ on Firefly Pocket's host.
 #
 # The pages are templates: the operator's name, contact address and site name
 # come from LEGAL_OWNER_NAME, LEGAL_CONTACT_EMAIL and LEGAL_SITE_NAME in .env
 # (compose passes them to Caddy), so nothing personal is committed.
 {$LEGAL_HOSTNAME} {
 	import security_headers
-	root * /srv/legal
-	try_files {path} {path}.html {path}/index.html
-	templates
-	file_server
+	import legal_pages
 }
 
 # Intentionally absent:
