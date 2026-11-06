@@ -93,13 +93,15 @@ jobs:
       # token, to Caddy and the console alike.
       - name: The setup gate follows the importer's token
         run: |
+          # Caddy's alone: the console reads it from the agent's status, so
+          # making the account does not start it again.
           gate() {
             docker compose --project-directory compose config --format json \
-              | jq -r '[.services.caddy.environment.FIREFLY_POCKET_SETUP, .services.console.environment.FIREFLY_POCKET_SETUP] | join(" ")'
+              | jq -r '[.services.caddy.environment.FIREFLY_POCKET_SETUP, (.services.console.environment.FIREFLY_POCKET_SETUP // "none")] | join(" ")'
           }
-          [ "$(IMPORTER_FIREFLY_TOKEN= gate)" = " " ] || { echo "gated: expected empty, got '$(IMPORTER_FIREFLY_TOKEN= gate)'"; exit 1; }
-          [ "$(IMPORTER_FIREFLY_TOKEN=eyJ0x gate)" = "done done" ] || { echo "open: expected done, got '$(IMPORTER_FIREFLY_TOKEN=eyJ0x gate)'"; exit 1; }
-          echo "gated without the token, open with it"
+          [ "$(IMPORTER_FIREFLY_TOKEN= gate)" = " none" ] || { echo "gated: expected empty, got '$(IMPORTER_FIREFLY_TOKEN= gate)'"; exit 1; }
+          [ "$(IMPORTER_FIREFLY_TOKEN=eyJ0x gate)" = "done none" ] || { echo "open: expected done, got '$(IMPORTER_FIREFLY_TOKEN=eyJ0x gate)'"; exit 1; }
+          echo "gated without the token, open with it, and the console's environment does not change with it"
 
   suggester:
     runs-on: ubuntu-24.04

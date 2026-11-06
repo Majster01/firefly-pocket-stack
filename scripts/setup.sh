@@ -487,7 +487,7 @@ step_web() {
 # (bank.sh). The private key never leaves this server: it goes into the store,
 # the certificate (public) into compose/secrets/eb/.
 new_eb_key() {
-  make_eb_key "$WORK" || die "openssl could not make the key and its certificate"
+  make_eb_key "$WORK" || die "$EB_PROBLEM"
   reload
 }
 

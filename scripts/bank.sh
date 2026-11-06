@@ -23,19 +23,33 @@ eb_pem() {
 
 # make_eb_key <dir>: a new key, into the store, and its certificate (public)
 # into EB_CERT. The application ID goes: it was the old key's. <dir> must be
-# private (mktemp -d), as the key passes through it. The caller renders.
+# private (mktemp -d), as the key passes through it. The caller renders. On a
+# failure, EB_PROBLEM says why; the key and the ID are changed only once the
+# certificate is in place beside the old one.
+# shellcheck disable=SC2034  # EB_PROBLEM is the caller's
 make_eb_key() {
-  local dir="$1" b64
+  local dir="$1" certs b64
+  certs="$(dirname "$EB_CERT")"
+  mkdir -p "$certs" 2>/dev/null || true
+  if [ ! -w "$certs" ]; then
+    EB_PROBLEM="$certs is not writable by $(id -un): Docker made it, as root, before setup did. On the server: sudo chown $(id -un) $certs"
+    return 1
+  fi
+  EB_PROBLEM="openssl could not make the key and its certificate"
   openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:4096 -out "$dir/eb.pem" 2>/dev/null || return 1
   openssl req -new -x509 -key "$dir/eb.pem" -days 3650 -subj "/CN=$NEXT_HOSTNAME" -out "$dir/eb.crt" 2>/dev/null \
     || { rm -f "$dir/eb.pem"; return 1; }
   b64="$(grep -v -- '-----' "$dir/eb.pem" | tr -d '\n\r')"
   rm -f "$dir/eb.pem"
-  "$FP" config set --no-render ENABLE_BANKING_PRIVATE_KEY - <<<"$b64" >/dev/null || return 1
+  EB_PROBLEM="the certificate could not be written to $certs"
+  install -m 644 "$dir/eb.crt" "$EB_CERT.new" || return 1
+  EB_PROBLEM="the settings store did not take the new key"
+  "$FP" config set --no-render ENABLE_BANKING_PRIVATE_KEY - <<<"$b64" >/dev/null || { rm -f "$EB_CERT.new"; return 1; }
   if "$FP" config has ENABLE_BANKING_APP_ID; then
     "$FP" config unset ENABLE_BANKING_APP_ID >/dev/null || return 1
   fi
-  mkdir -p "$(dirname "$EB_CERT")" && install -m 644 "$dir/eb.crt" "$EB_CERT"
+  mv -f "$EB_CERT.new" "$EB_CERT"
+  EB_PROBLEM=""
 }
 
 # eb_cert_matches <base64>: EB_CERT is this key's certificate. A key set by hand

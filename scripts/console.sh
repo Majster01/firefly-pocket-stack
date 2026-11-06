@@ -73,12 +73,14 @@ die() { echo "FATAL: $*" >&2; exit 1; }
 # refuse: as die, for a request that changed nothing.
 refuse() { echo "FATAL: $*" >&2; exit 2; }
 
-# The directories the console's container mounts. Made here, by this user,
-# before compose starts it: Docker would make missing ones itself, owned by
-# root. The inbox is like /tmp without the reading: the console, another user
+# The directories the console's container mounts, and the one the importer
+# mounts the bank step's certificate from (bank.sh). Made here, by this user,
+# before compose starts either: Docker would make missing ones itself, owned by
+# root. The deploy, setup web and the wizard's start step all write the status
+# first. The inbox is like /tmp without the reading: the console, another user
 # (docker-compose.yml), can add files but cannot list them or remove any.
 console_dirs() {
-  mkdir -p "$INBOX" "$CONSOLE_DIR/status"
+  mkdir -p "$INBOX" "$CONSOLE_DIR/status" "$(dirname "$EB_CERT")"
   chmod 755 "$CONSOLE_DIR" "$CONSOLE_DIR/status"
   chmod 1733 "$INBOX"
 }
@@ -423,7 +425,7 @@ cmd_bank_key() {
   dir="$(mktemp -d)"
   # shellcheck disable=SC2064  # $dir is fixed now
   trap "rm -rf '$dir'" EXIT
-  make_eb_key "$dir" || refuse "This server could not make the key: openssl failed. The journal has why (journalctl -u firefly-pocket-console)"
+  make_eb_key "$dir" || refuse "$EB_PROBLEM"
   "$FP" config render >/dev/null
   # The importer has the old key: it starts again with the new one, and no ID.
   compose up -d --no-build importer \
