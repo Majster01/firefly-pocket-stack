@@ -101,6 +101,7 @@ input {
   padding: 8px 10px;
 }
 input[aria-invalid="true"] { border-color: var(--bad); }
+input[readonly] { color: var(--quiet); }
 .field p { margin: 4px 0 0; }
 button, .button {
   display: inline-block;

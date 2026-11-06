@@ -18,8 +18,10 @@ import sys
 import tempfile
 import threading
 import unittest
+from datetime import datetime, timezone
 from http.server import ThreadingHTTPServer
 from pathlib import Path
+from urllib.parse import quote
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -196,6 +198,18 @@ class ConsoleTest(unittest.TestCase):
         self.assertEqual(resp.status, 403)
         self.assertEqual(self.requests(), [])
 
+    def test_origin_null_from_this_page(self):
+        # What a browser sends where a referrer policy hides the origin: only
+        # Sec-Fetch-Site tells this page's own form from another site's.
+        def login(fetch_site):
+            headers = {"host": HOST, "x-forwarded-proto": "https", "origin": "null"}
+            if fetch_site:
+                headers["sec-fetch-site"] = fetch_site
+            return self.app.handle(Request("POST", "/login", headers, f"code={CODE}".encode())).status
+        self.assertEqual(login("same-origin"), 303)
+        self.assertEqual(login("cross-site"), 403)
+        self.assertEqual(login(""), 403)
+
     def test_session_ends(self):
         cookie = self.sign_in()
         self.assertEqual(self.call("GET", "/server", cookie=cookie).status, 200)
@@ -253,6 +267,7 @@ class ConsoleTest(unittest.TestCase):
         self.assertEqual(stat.S_IMODE(files[0].stat().st_mode), 0o644)
         request = json.loads(files[0].read_text())
         self.assertEqual(request["action"], "server")
+        self.assertEqual(request["code"], "7K2MQ9TB0XH4PVRA")  # the agent checks it too
         self.assertEqual(request["settings"], {"DOMAIN": "fx.example.com", "SITE_OWNER": "you@example.com",
                                                "LEGAL_OWNER_NAME": "Ana Novak", "TZ": "Europe/Ljubljana"})
 
@@ -267,6 +282,7 @@ class ConsoleTest(unittest.TestCase):
         done = self.call("GET", location, cookie=cookie)
         self.assertEqual(done.status, 200)
         self.assertIn(b"Saved: your name and the timezone.", done.body)
+        self.assertIn(b'href="/account"', done.body)
 
     def test_a_refused_request(self):
         self.write_status(requests={"ab" * 16: {"state": "refused", "message": "TZ: an IANA timezone",
@@ -300,13 +316,119 @@ class ConsoleTest(unittest.TestCase):
         app = self.make(setup_done=True)
         resp = self.call("GET", "/", app=app)
         self.assertEqual(resp.status, 200)
-        self.assertIn(b"Setup is finished", resp.body)
+        self.assertIn(b"Firefly III has its account", resp.body)
         self.assertIn(b"https://firefly.fx.example.com/", resp.body)
+        self.assertNotIn(b"did not finish", resp.body)
         resp = self.call("POST", "/login", f"code={CODE}", app=app)
-        self.assertIn(b"Setup is finished", resp.body)
+        self.assertIn(b"Firefly III has its account", resp.body)
         self.assertFalse(any(name == "Set-Cookie" for name, _ in resp.headers))
-        resp = self.call("POST", "/server", "domain=evil.example", app=app)
+        for path, body in (("/server", "domain=evil.example"), ("/account", "password=x" * 20)):
+            self.call("POST", path, body, app=app)
         self.assertEqual(self.requests(), [])
+
+    def test_finished_says_when_the_last_step_failed(self):
+        # The account is made, so the gate opened, but not everything started.
+        self.write_status(requests={
+            "ab" * 16: {"state": "applied", "message": "Saved: the timezone.", "action": "server", "at": "2026-11-06T12:00:00Z"},
+            "cd" * 16: {"state": "failed", "message": "not running: importer.", "action": "account", "at": "2026-11-06T12:09:00Z"},
+        })
+        page = self.call("GET", "/", app=self.make(setup_done=True)).body
+        self.assertIn(b"did not finish: not running: importer.", page)
+
+    # ------------------------------------------------------------ account ---
+    def account_status(self, **extra):
+        self.write_status(settings={"DOMAIN": "fx.example.com", "SITE_OWNER": "you@example.com", "LEGAL_OWNER_NAME": "",
+                                    "TZ": "Europe/Ljubljana", "ADMIN_HOSTNAME": ""}, **extra)
+
+    def test_account_waits_for_the_server_step(self):
+        self.write_status()  # no TZ saved yet
+        cookie = self.sign_in()
+        page = self.call("GET", "/account", cookie=cookie).body
+        self.assertIn(b"Save the Server step first", page)
+        self.assertNotIn(b'name="password"', page)
+        password = "correct+horse+battery+staple"
+        resp = self.call("POST", "/account", f"password={password}&password2={password}", cookie=cookie)
+        self.assertEqual(resp.status, 409)
+        self.assertEqual(self.requests(), [])
+
+    def test_account_page(self):
+        self.account_status()
+        resp = self.call("GET", "/account", cookie=self.sign_in())
+        page = resp.body.decode()
+        self.assertEqual(resp.status, 200)
+        self.assertIn('value="you@example.com"', page)
+        self.assertIn('autocomplete="username"', page)
+        self.assertEqual(page.count('type="password" autocomplete="new-password"'), 2)
+        self.assertIn("https://firefly.fx.example.com", page)
+        self.assertIn('href="/server"', page)  # the stepper goes back
+        self.assertIn('aria-current="step">Firefly III account', page)
+
+    def test_account_refuses_a_bad_password(self):
+        self.account_status()
+        cookie = self.sign_in()
+        for body, status, text in (
+            ("password=short&password2=short", 400, b"At least 16 characters"),
+            ("password=correct+horse+battery&password2=correct+horse+batterz", 400, b"The two differ"),
+            ("password=correct%07horse+battery&password2=correct%07horse+battery", 400, b"No control characters"),
+        ):
+            resp = self.call("POST", "/account", body, cookie=cookie)
+            self.assertEqual(resp.status, status, body)
+            self.assertIn(text, resp.body)
+            self.assertNotIn(b"horse", resp.body)  # never written back into the page
+        self.assertEqual(self.requests(), [])
+
+    def test_account_hands_the_password_to_the_agent(self):
+        self.account_status()
+        cookie = self.sign_in()
+        password = "correct horse battery staple ✓"
+        form = f"password={quote(password)}&password2={quote(password)}&email=other%40example.com"
+        resp = self.call("POST", "/account", form, cookie=cookie)
+        self.assertEqual(resp.status, 303)
+        location = dict(resp.headers)["Location"]
+        rid = re.fullmatch(r"/requests/([0-9a-f]{32})", location).group(1)
+        files = self.requests()
+        self.assertEqual([f.name for f in files], [f"{rid}.json"])
+        request = json.loads(files[0].read_text())
+        # Only the password: the email is the one the server keeps, whatever the form says.
+        self.assertEqual({k: request[k] for k in ("action", "code", "password")},
+                         {"action": "account", "code": "7K2MQ9TB0XH4PVRA", "password": password})
+        self.assertNotIn("settings", request)
+
+        waiting = self.call("GET", location, cookie=cookie)
+        self.assertEqual(waiting.status, 202)
+        self.assertIn(b"Making your account", waiting.body)
+        # A second try while the first runs only goes back to the first.
+        for method, body in (("GET", ""), ("POST", form)):
+            again = self.call(method, "/account", body, cookie=cookie)
+            self.assertEqual((again.status, dict(again.headers).get("Location")), (303, location))
+        self.assertEqual(len(self.requests()), 1)
+
+        self.account_status(requests={rid: {"state": "running", "action": "account", "at": "2026-11-06T12:00:00Z",
+                                            "message": "Starting Firefly III, and nothing that makes it public."}})
+        running = self.call("GET", location, cookie=cookie)
+        self.assertEqual(running.status, 202)
+        self.assertIn(b'http-equiv="refresh"', running.body)
+        self.assertIn(b"Starting Firefly III", running.body)
+
+        self.account_status(requests={rid: {"state": "failed", "action": "account", "at": "2026-11-06T12:04:00Z",
+                                            "message": "Firefly III did not answer within five minutes."}})
+        failed = self.call("GET", location, cookie=cookie)
+        self.assertIn(b"Not done", failed.body)
+        self.assertIn(b"did not answer within five minutes", failed.body)
+        # Then it can be tried again.
+        self.assertEqual(self.call("GET", "/account", cookie=cookie).status, 200)
+
+    def test_a_stale_account_request(self):
+        rid = "ef" * 16
+        self.account_status(requests={rid: {"state": "running", "action": "account", "at": "2026-11-06T12:00:00Z",
+                                            "message": "Downloading every service."}})
+        at = datetime(2026, 11, 6, 12, tzinfo=timezone.utc).timestamp()
+        self.clock.now = at + console.STALE_SECONDS - 60
+        self.assertIn(b"Downloading every service.", self.call("GET", f"/requests/{rid}", cookie=self.sign_in()).body)
+        self.clock.now = at + console.STALE_SECONDS + 60
+        page = self.call("GET", f"/requests/{rid}", cookie=self.sign_in()).body
+        self.assertIn(b"stopped working on it", page)
+        self.assertNotIn(b'http-equiv="refresh"', page)
 
     def test_no_code(self):
         resp = self.call("GET", "/", app=self.make(code=""))
@@ -359,6 +481,7 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertIn("frame-ancestors 'none'", headers["Content-Security-Policy"])
         self.assertEqual(headers["Cache-Control"], "no-store")
+        self.assertEqual(headers["Referrer-Policy"], "same-origin")  # no-referrer would null the forms' Origin
         self.assertEqual(int(headers["Content-Length"]), len(body))
         self.assertNotIn("Python", headers.get("Server", ""))
 
