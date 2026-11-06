@@ -185,7 +185,7 @@ services:
   # sha-<commit>. A merge into its main pins the new tag here through
   # .github/workflows/pin.yml, which deploys it.
   next:
-    image: ghcr.io/majster01/firefly-pocket:sha-5da9964
+    image: ghcr.io/majster01/firefly-pocket:sha-77f42d4
     container_name: fireflyx-next
     restart: unless-stopped
     logging: *default-logging
