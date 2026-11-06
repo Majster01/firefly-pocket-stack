@@ -129,7 +129,7 @@ jobs:
 
       - name: The console's tests
         run: |
-          image="$(awk '/^  console:/ { found = 1 } found && /^    image:/ { print $2; exit }' compose/docker-compose.yml)"
+          image="$(awk '/^services:/ { s = 1 } s && /^  console:/ { found = 1 } found && /^    image:/ { print $2; exit }' compose/docker-compose.yml)"
           echo "in $image"
           docker run --rm --read-only --user 10001:10001 --tmpfs /tmp \
             -v "$PWD/services/console:/app:ro" -w /app "$image" python -I -B test_console.py
