@@ -640,7 +640,7 @@ echo "==> after setup, the console signs its owner in with Firefly III"
 # this machine, Caddy's own CA is not checked, and redirects are followed by
 # hand. The password comes on stdin.
 cat > "$jar/browser.py" <<'BROWSER'
-import html, http.cookiejar, re, socket, ssl, subprocess, sys, urllib.parse, urllib.request
+import html, http.cookiejar, re, socket, ssl, subprocess, sys, time, urllib.parse, urllib.request
 
 admin, firefly, email = sys.argv[1:4]
 rotate = sys.argv[4:5] == ["rotate"]
@@ -732,7 +732,13 @@ with opener.open(f"https://{admin}/bank/certificate") as r, open(certificate, "w
 status, page, url = handed_over("/bank", {"app_id": app_id}, "BANK")
 if "Firefly Pocket CI" not in page:
     sys.exit(f"the console does not say the ID was kept: {status} {url} {page[-800:]}")
-status, page, url = go(f"https://{admin}/importer/")
+# The ID just kept starts the importer again: Caddy cannot reach it (502)
+# until it listens.
+for _ in range(60):
+    status, page, url = go(f"https://{admin}/importer/")
+    if status not in (502, 503, 504):
+        break
+    time.sleep(2)
 print("IMPORTER", status, url)
 if status != 200 or not url.startswith(f"https://{admin}/importer/") or f'href="https://{admin}/importer/' not in page:
     sys.exit(f"the importer's pages are not under https://{admin}/importer/ for the signed-in owner: {status} {url} {page[:600]}")
