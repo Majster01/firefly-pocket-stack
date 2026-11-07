@@ -226,6 +226,8 @@ RESTIC_PASSWORD_LENGTH = 32
 APP_ID_RE = re.compile(r"[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}")
 APP_ID_EXAMPLE = "1b4e28ba-2fa1-11d2-883f-0016d3cca427"
 
+NOT_FOUND = '<section class="narrow"><h1>Not found</h1><p><a href="/server">Back to setup</a></p></section>'
+
 ROLES = {
     "admin": "this console",
     "firefly": "Firefly III",
@@ -530,7 +532,8 @@ class Console:
         if req.method not in ("GET", "HEAD", "POST"):
             return Response(405, b"", headers=[("Allow", "GET, HEAD, POST")])
         if req.method == "POST" and not same_origin(req):
-            return self.page(403, "Refused", "<h1>Refused</h1><p>That form was not sent from this page.</p>")
+            return self.page(403, "Refused", '<section class="narrow"><h1>Refused</h1>'
+                             "<p>That form was not sent from this page.</p></section>")
         state = read_status(self.status_file)
         # Finished: the server removed the code, and starts this again without
         # it; until then the agent refuses what this would send.
@@ -576,7 +579,7 @@ class Console:
         match = re.fullmatch(r"/requests/([0-9a-f]{32})", path)
         if match and req.method != "POST":
             return self.request_page(req, match.group(1))
-        return self.page(404, "Not found", "<h1>Not found</h1><p><a href=\"/server\">Back to setup</a></p>", signed_in=True)
+        return self.page(404, "Not found", NOT_FOUND, signed_in=True)
 
     # ------------------------------------------------------------ sign in ---
     def signed_in(self, req: Request) -> bool:
@@ -680,9 +683,7 @@ class Console:
     <p>Once these are saved: your Firefly III account. The names need not be ready for it.</p>
     <p><a class="button" href="/account">Firefly III account</a></p>"""
         body = f"""
-<div class="setup">
-  {stepper(SERVER, state)}
-  <section class="panel">
+<section class="panel">
     <h1>Server</h1>
     {note}
     {form}
@@ -690,9 +691,8 @@ class Console:
     {names_html}
     <h2>Next</h2>
     {after}
-  </section>
-</div>"""
-        return self.page(status, "Server", body, signed_in=True)
+  </section>"""
+        return self.page(status, "Server", body, signed_in=True, nav=stepper(SERVER, state))
 
     def field_html(self, f: Field, value: str, error: str) -> str:
         extra = ' list="timezones"' if f.kind == "timezone" else ""
@@ -815,34 +815,26 @@ class Console:
             if last.get("state") == "failed":  # the account is made, but not everything started
                 problem = f'<p class="error">The server\'s last try did not finish: {esc(last.get("message") or "")}</p>'
             body = f"""
-<div class="setup">
-  {stepper(ACCOUNT, state)}
-  <section class="panel">
+<section class="panel">
     <h1>Firefly III account</h1>
     <p class="good">Done: you sign in{where} as {esc(email)}, and each app has its token.</p>
     {problem}
     <p>Turn on two-factor authentication there: Options, Profile.</p>
     <h2>Next</h2>
     <p><a class="button" href="/bank">Next: Bank connection</a></p>
-  </section>
-</div>"""
-            return self.page(status, "Firefly III account", body, signed_in=True)
+  </section>"""
+            return self.page(status, "Firefly III account", body, signed_in=True, nav=stepper(ACCOUNT, state))
         if not server_saved(state):
             body = f"""
-<div class="setup">
-  {stepper(ACCOUNT, state)}
-  <section class="panel">
+<section class="panel">
     <h1>Firefly III account</h1>
     <p>Save the Server step first: the account's email is the one it keeps.</p>
     <p><a class="button" href="/server">Server</a></p>
-  </section>
-</div>"""
-            return self.page(status, "Firefly III account", body, signed_in=True)
+  </section>"""
+            return self.page(status, "Firefly III account", body, signed_in=True, nav=stepper(ACCOUNT, state))
         errors = errors or {}
         body = f"""
-<div class="setup">
-  {stepper(ACCOUNT, state)}
-  <section class="panel">
+<section class="panel">
     <h1>Firefly III account</h1>
     {note}
     <p>Your Firefly III account: you sign in{where} with your email and this password. The server makes
@@ -863,9 +855,8 @@ class Console:
     <p class="quiet">It takes a few minutes: the server downloads every service, starts Firefly III, which
     sets up its database the first time, makes the account and the tokens, then starts everything else.
     Then every name opens.</p>
-  </section>
-</div>"""
-        return self.page(status, "Firefly III account", body, signed_in=True)
+  </section>"""
+        return self.page(status, "Firefly III account", body, signed_in=True, nav=stepper(ACCOUNT, state))
 
     def save_account(self, req: Request) -> Response:
         running = self.account_running()
@@ -893,15 +884,12 @@ class Console:
         state = read_status(self.status_file)
         if not account_made(state):
             body = f"""
-<div class="setup">
-  {stepper(BANK, state)}
-  <section class="panel">
+<section class="panel">
     <h1>Bank connection</h1>
     <p>Make the Firefly III account first: the bank importer needs its token.</p>
     <p><a class="button" href="/account">Firefly III account</a></p>
-  </section>
-</div>"""
-            return self.page(status, "Bank connection", body, signed_in=True)
+  </section>"""
+            return self.page(status, "Bank connection", body, signed_in=True, nav=stepper(BANK, state))
         bank = part(state, "bank")
         hosts = hosts_of(state)
         app_id = str(bank.get("app_id") or "")
@@ -961,9 +949,7 @@ class Console:
             after = """<p>Firefly Pocket links no bank until this is done. <a href="/suggestions">Skip it for now</a>: on the
     server, <code>scripts/firefly-pocket setup bank</code> does it later.</p>"""
         body = f"""
-<div class="setup">
-  {stepper(BANK, state)}
-  <section class="panel">
+<section class="panel">
     <h1>Bank connection</h1>
     {note}
     <p>Firefly Pocket imports from your bank through Enable Banking
@@ -973,9 +959,8 @@ class Console:
     {steps}
     <h2>Next</h2>
     {after}
-  </section>
-</div>"""
-        return self.page(status, "Bank connection", body, signed_in=True)
+  </section>"""
+        return self.page(status, "Bank connection", body, signed_in=True, nav=stepper(BANK, state))
 
     def make_key(self, req: Request) -> Response:
         if not account_made(read_status(self.status_file)):
@@ -996,7 +981,8 @@ class Console:
         what Enable Banking checks the key's signatures with."""
         cert = str(part(read_status(self.status_file), "bank").get("certificate") or "")
         if not cert.startswith("-----BEGIN CERTIFICATE-----"):
-            return self.page(404, "Not found", '<h1>Not found</h1><p>No certificate yet. <a href="/bank">Bank connection</a></p>',
+            return self.page(404, "Not found", '<section class="narrow"><h1>Not found</h1>'
+                             '<p>No certificate yet. <a href="/bank">Bank connection</a></p></section>',
                              signed_in=True)
         return Response(200, cert.encode(), "application/x-pem-file",
                         [("Content-Disposition", 'attachment; filename="firefly-pocket-enable-banking.crt"')])
@@ -1020,15 +1006,12 @@ class Console:
     def needs_account(self, current: int, title: str, status: int) -> Response:
         state = read_status(self.status_file)
         body = f"""
-<div class="setup">
-  {stepper(current, state)}
-  <section class="panel">
+<section class="panel">
     <h1>{esc(title)}</h1>
     <p>Make the Firefly III account first.</p>
     <p><a class="button" href="/account">Firefly III account</a></p>
-  </section>
-</div>"""
-        return self.page(status, title, body, signed_in=True)
+  </section>"""
+        return self.page(status, title, body, signed_in=True, nav=stepper(current, state))
 
     def suggestions_page(self, req: Request, status: int = 200, values=None, errors=None, note: str = "") -> Response:
         state = read_status(self.status_file)
@@ -1053,9 +1036,7 @@ class Console:
                  """<p>Firefly Pocket makes no suggestions until this is done. <a href="/alerts">Skip it for now</a>: on the
     server, <code>scripts/firefly-pocket setup suggestions</code> does it later.</p>""")
         body = f"""
-<div class="setup">
-  {stepper(SUGGESTIONS, state)}
-  <section class="panel">
+<section class="panel">
     <h1>Category suggestions</h1>
     {note}
     <p>Each night an AI model suggests a category for each new transaction, as a rule you approve in Firefly
@@ -1080,9 +1061,8 @@ class Console:
     <p class="quiet">The server asks the provider for the model with this key before it keeps it.</p>
     <h2>Next</h2>
     {after}
-  </section>
-</div>"""
-        return self.page(status, "Category suggestions", body, signed_in=True)
+  </section>"""
+        return self.page(status, "Category suggestions", body, signed_in=True, nav=stepper(SUGGESTIONS, state))
 
     def save_suggestions(self, req: Request) -> Response:
         if not account_made(read_status(self.status_file)):
@@ -1161,9 +1141,7 @@ class Console:
         else:
             checks_html = checks_form
         body = f"""
-<div class="setup">
-  {stepper(ALERTS, state)}
-  <section class="panel">
+<section class="panel">
     <h1>Alerts</h1>
     {note}
     <p>When something fails (an import, a backup, a bank consent about to end), an alert goes to the Firefly Pocket
@@ -1179,9 +1157,8 @@ class Console:
     {checks_html}
     <h2>Next</h2>
     <p><a class="button" href="/backups">Next: Backups</a></p>
-  </section>
-</div>"""
-        return self.page(status, "Alerts", body, signed_in=True)
+  </section>"""
+        return self.page(status, "Alerts", body, signed_in=True, nav=stepper(ALERTS, state))
 
     def save_alerts(self, req: Request, what: str) -> Response:
         state = read_status(self.status_file)
@@ -1296,9 +1273,7 @@ class Console:
             after = """<p>Without one, losing this server loses everything. <a href="/updates">Skip it for now</a>: on the
     server, <code>scripts/firefly-pocket setup backups</code> does it later.</p>"""
         body = f"""
-<div class="setup">
-  {stepper(BACKUPS, state)}
-  <section class="panel">
+<section class="panel">
     <h1>Backups</h1>
     {note}
     <p>At 02:00 each night the databases, the attachments and the settings are backed up on this server. A
@@ -1307,9 +1282,8 @@ class Console:
     {saved_html}
     <h2>Next</h2>
     {after}
-  </section>
-</div>"""
-        return self.page(status, "Backups", body, signed_in=True)
+  </section>"""
+        return self.page(status, "Backups", body, signed_in=True, nav=stepper(BACKUPS, state))
 
     def save_backups(self, req: Request) -> Response:
         state = read_status(self.status_file)
@@ -1383,9 +1357,7 @@ class Console:
             after = f"""<p><a href="{finish}">Skip it for now</a>: on the server, <code>scripts/firefly-pocket setup updates</code>
     does it later.</p>"""
         body = f"""
-<div class="setup">
-  {stepper(UPDATES, state)}
-  <section class="panel">
+<section class="panel">
     <h1>Updates</h1>
     {note}
     <p>The deploy agent keeps this server up to date. Every two minutes it looks at master of {repository}, and when it
@@ -1397,9 +1369,8 @@ class Console:
     <p class="quiet">Following a release channel (stable or latest) instead of master comes later.</p>
     <h2>Next</h2>
     {after}
-  </section>
-</div>"""
-        return self.page(status, "Updates", body, signed_in=True)
+  </section>"""
+        return self.page(status, "Updates", body, signed_in=True, nav=stepper(UPDATES, state))
 
     def save_updates(self, req: Request) -> Response:
         state = read_status(self.status_file)
@@ -1412,20 +1383,15 @@ class Console:
         state = read_status(self.status_file)
         if not account_made(state):
             body = f"""
-<div class="setup">
-  {stepper(FINISH, state)}
-  <section class="panel">
+<section class="panel">
     <h1>Finish</h1>
     <p>Make the Firefly III account first: finishing before it would leave this server showing only this
     console, with no code to open it.</p>
     <p><a class="button" href="/account">Firefly III account</a></p>
-  </section>
-</div>"""
-            return self.page(status, "Finish", body, signed_in=True)
+  </section>"""
+            return self.page(status, "Finish", body, signed_in=True, nav=stepper(FINISH, state))
         body = f"""
-<div class="setup">
-  {stepper(FINISH, state)}
-  <section class="panel">
+<section class="panel">
     <h1>Finish</h1>
     {note}
     {summary(state)}
@@ -1434,9 +1400,8 @@ class Console:
     <h2>Finish setup</h2>
     <p>Then the setup code works no more, and this console opens only to you, signed in with Firefly III.</p>
     <form method="post" action="/finish"><button type="submit">Finish setup</button></form>
-  </section>
-</div>"""
-        return self.page(status, "Finish", body, signed_in=True)
+  </section>"""
+        return self.page(status, "Finish", body, signed_in=True, nav=stepper(FINISH, state))
 
     def save_finish(self, req: Request) -> Response:
         if not account_made(read_status(self.status_file)):
@@ -1453,13 +1418,17 @@ class Console:
             action = str(result.get("action") or action)
         done, not_done, working = OUTCOME.get(action, OUTCOME["server"])
         back = BACK.get(action, "/server")
+        # Where the nav leads is where the request belongs; not once Finish is applied (the console restarts) and not
+        # for a domain change (this host goes away): their links would lead nowhere.
+        finished = action == "finish" and isinstance(result, dict) and result.get("state") == "applied"
+        nav = "" if finished or moves_to else stepper(step_of(back), state)
         after = state.get("setup_done") is True
         back_label = "Back" if after else "Back to setup"
         if isinstance(result, dict) and result.get("state") in ("applied", "refused", "failed"):
             message = esc(result.get("message") or "")
             if result.get("state") != "applied":
                 return self.page(200, not_done, f'<section class="narrow"><h1>{not_done}</h1><p class="error">{message}</p>'
-                                 f'<p><a class="button" href="{back}">{back_label}</a></p></section>', signed_in=True)
+                                 f'<p><a class="button" href="{back}">{back_label}</a></p></section>', signed_in=True, nav=nav)
             if action == "bank_key":  # nothing to read: the bank page shows the certificate
                 return redirect("/bank")
             if action == "backups":  # a new repository's password is not shown again
@@ -1473,7 +1442,7 @@ class Console:
             elif action == "finish":
                 links = 'This console starts again without the code: <a href="/">open it again</a> in a moment.'
             return self.page(200, done, f'<section class="narrow"><h1>{done}</h1><p>{message}</p><p>{links}</p></section>',
-                             signed_in=True)
+                             signed_in=True, nav=nav)
         takes = {"account": "This takes a few minutes.", "backups": "This can take a minute.",
                  "updates": "This can take a minute."}.get(
             action, "This takes a few seconds.")
@@ -1483,14 +1452,14 @@ class Console:
   <p>The server stopped working on it, after: {esc(result.get("message") or "")}</p>
   <p class="error">On the server, <code>journalctl -u firefly-pocket-console</code> says why.</p>
   <p><a class="button" href="{back}">{back_label}</a></p></section>"""
-                return self.page(200, not_done, body, signed_in=True)
+                return self.page(200, not_done, body, signed_in=True, nav=nav)
             body = f"""<section class="narrow"><h1>{working}</h1>
   <p>{esc(result.get("message") or "")}</p>
   <p class="quiet">{takes} This page looks again every few seconds; reload it if it shows an
   error while Caddy starts again.</p></section>"""
-            return self.page(202, working, body, refresh=3, signed_in=True)
+            return self.page(202, working, body, refresh=3, signed_in=True, nav=nav)
         if not started:
-            return self.page(404, "Not found", '<h1>Not found</h1><p><a href="/server">Back to setup</a></p>', signed_in=True)
+            return self.page(404, "Not found", NOT_FOUND, signed_in=True)
         if moves_to:
             # This host goes away once the agent applies it: no reload to an error page.
             body = f"""<section class="narrow"><h1>Saving</h1>
@@ -1508,7 +1477,7 @@ class Console:
         body = f"""<section class="narrow"><h1>{working}</h1>
   <p>The server checks what you sent and applies it. {takes} This page looks again every few seconds; reload it
   if it shows an error while Caddy starts again.</p>{hint}</section>"""
-        return self.page(202, working, body, refresh=3, signed_in=True)
+        return self.page(202, working, body, refresh=3, signed_in=True, nav=nav)
 
     # -------------------------------------------------------- after setup ---
     def after_setup(self, req: Request, state: dict) -> Response:
@@ -1647,7 +1616,7 @@ class Console:
   <p class="quiet">This sign-in lasts eight hours; then Firefly III takes the console's token no more. Sign out when
   you are done.</p>
 </section>"""
-        return self.page(200, "Your server", body, signed_in=True)
+        return self.page(200, "Your server", body, signed_in=True, nav=stepper(None, state))
 
     def finished(self, state: dict, status: int = 200) -> Response:
         hosts = hosts_of(state)
@@ -1685,7 +1654,10 @@ class Console:
         return self.page(status, "Setup is finished", body)
 
     # -------------------------------------------------------------- pages ---
-    def page(self, status: int, title: str, main: str, refresh: int | None = None, signed_in: bool = False) -> Response:
+    def page(self, status: int, title: str, main: str, refresh: int | None = None, signed_in: bool = False,
+             nav: str = "") -> Response:
+        """A page in the console's shell. With a nav (`stepper()`), the step navigation sits beside it (above it on a
+        phone) and stays in view; without one the page stands alone: sign-in, results that move the console, errors."""
         meta = f'<meta http-equiv="refresh" content="{refresh}">' if refresh else ""
         logout = (
             '<form method="post" action="/logout" class="logout"><button type="submit" class="link">Sign out</button></form>'
@@ -1701,8 +1673,13 @@ class Console:
 <link rel="stylesheet" href="/console.css">
 </head>
 <body>
-<header><span><strong>Firefly Pocket</strong> Console</span>{logout}</header>
+<div class="app{' has-nav' if nav else ''}">
+<div class="rail">
+<header><span class="brand"><strong>Firefly Pocket</strong> Console</span>{logout}</header>
+{nav}
+</div>
 <main>{main}</main>
+</div>
 </body>
 </html>
 """
@@ -1795,25 +1772,41 @@ def new_password() -> str:
     return "".join(secrets.choice(alphabet) for _ in range(RESTIC_PASSWORD_LENGTH))
 
 
-def stepper(current: int, state: dict) -> str:
+def step_of(path: str) -> int:
+    """The step whose page is `path`."""
+    return next(i for i, (_, page) in enumerate(STEPS) if page == path)
+
+
+def stepper(current: int | None, state: dict) -> str:
+    """The step navigation: before setup the eight steps; after it the overview (current None, after setup only)
+    and the steps that change from here. `where` is the phone bar's fixed label, since CSS cannot scroll the
+    current pill into view."""
     done = steps_done(state)
-    items = ""
     if state.get("setup_done") is True:
-        # After setup: the steps that change from here, and the overview.
-        items = '<li class="done"><a href="/">Your server</a></li>'
+        if current is not None and not BANK <= current <= UPDATES:  # an old Server, Account or Finish request page
+            current = None
+        overview = current is None
+        kind = "now" if overview else "done"
+        aria = ' aria-current="page"' if overview else ""
+        label = "Your server" if overview else '<a href="/">Your server</a>'
+        items = f'<li class="{kind}"{aria}>{label}</li>'
+        where = "Your server" if overview else STEPS[current][0]
         for i, (name, path) in enumerate(STEPS):
             if BANK <= i <= UPDATES:
                 kind = "now" if i == current else ("done" if i in done else "later")
                 aria = ' aria-current="page"' if i == current else ""
                 label = f'<a href="{path}">{esc(name)}</a>' if i != current else esc(name)
                 items += f'<li class="{kind}"{aria}>{label}</li>'
-        return f'<nav class="steps" aria-label="Your server"><ol>{items}</ol></nav>'
+        return (f'<nav class="steps" aria-label="Your server"><p class="where">{esc(where)}</p>'
+                f'<ol class="after">{items}</ol></nav>')
+    items = ""
     for i, (name, path) in enumerate(STEPS):
         kind = "now" if i == current else ("done" if i in done else "later")
         aria = ' aria-current="step"' if i == current else ""
         label = f'<a href="{path}">{esc(name)}</a>' if path and i != current else esc(name)
         items += f'<li class="{kind}"{aria}>{label}</li>'
-    return f'<nav class="steps" aria-label="Setup steps"><ol>{items}</ol></nav>'
+    where = f"Step {current + 1} of {len(STEPS)} · {STEPS[current][0]}"
+    return f'<nav class="steps" aria-label="Setup steps"><p class="where">{esc(where)}</p><ol>{items}</ol></nav>'
 
 
 def password_field(name: str, label: str, error: str, help_text: str) -> str:
