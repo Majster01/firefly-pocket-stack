@@ -70,7 +70,10 @@
 #      leaves Firefly III taking none of the console's tokens, and the importer's
 #      pages shut. After setup, a request with no token, the old code, another
 #      app's token or a malformed one is refused; and console expire revokes a
-#      sign-in made nine hours old
+#      sign-in made nine hours old. Then the apps' tokens, as the nightly run
+#      rotates them: none due with a year left, all three made again when due,
+#      the old ones refused, and the importer and Firefly Pocket started again
+#      with the new ones
 #  10. the legal pages through Caddy: on their host, and under /legal/ on
 #      Firefly Pocket's; and a bank consent's callback reaching the importer
 #      fork on Firefly Pocket's host and on the importer's. With no sign-in, the
@@ -827,6 +830,41 @@ printf '%s\n' "$expired"
 grep -Eq ' [1-9][0-9]* revoked$' <<<"$expired" || fail "console expire revoked nothing: $expired"
 [ "$(console_tokens_live)" = 0 ] || fail "Firefly III still takes a console token nine hours old"
 echo "console expire revokes the console's tokens older than eight hours"
+
+echo "==> the apps' tokens: made again near their end, each app started again with its new one"
+# What the nightly run does first (scripts/tokens.sh). A token made today has a
+# year left, so nothing is due at 30 days; at 400, every token is.
+scripts/firefly-pocket tokens | tee "$jar/tokens.out"
+for key in IMPORTER_FIREFLY_TOKEN SUGGESTER_FIREFLY_TOKEN NEXT_WARMUP_FIREFLY_TOKEN; do
+  grep -Eq "^$key \(\"[^\"]+\"\): 36[3-6] days left$" "$jar/tokens.out" \
+    || fail "$key should have a year left: $(grep "^$key" "$jar/tokens.out")"
+done
+scripts/firefly-pocket tokens rotate | tee "$jar/rotate.out"
+grep -q 'a new one' "$jar/rotate.out" && fail "a token with a year left was made again"
+# shellcheck source=lib.sh
+source "$REPO_ROOT/scripts/lib.sh"
+[ "$IMPORTER_FIREFLY_TOKEN $SUGGESTER_FIREFLY_TOKEN $NEXT_WARMUP_FIREFLY_TOKEN" = "${tokens[*]}" ] \
+  || fail "tokens rotate changed a token that was not due"
+scripts/firefly-pocket tokens rotate --days 400 | tee "$jar/rotate.out"
+[ "$(grep -c 'a new token' "$jar/rotate.out")" -eq 3 ] || fail "tokens rotate --days 400 did not make all three again"
+# shellcheck source=lib.sh
+source "$REPO_ROOT/scripts/lib.sh"
+rotated=("$IMPORTER_FIREFLY_TOKEN" "$SUGGESTER_FIREFLY_TOKEN" "$NEXT_WARMUP_FIREFLY_TOKEN")
+for i in 0 1 2; do
+  [ "${rotated[$i]}" != "${tokens[$i]}" ] || fail "token $((i + 1)) of 3 was not made again"
+  grep -qF -- "${rotated[$i]}" "$jar/rotate.out" && fail "tokens rotate printed a token"
+  token_check "${rotated[$i]}"
+  went="$(printf 'header = "Authorization: Bearer %s"\n' "${tokens[$i]}" \
+    | docker run --rm -i --network "$DOCKER_NETWORK" "$CURL_IMAGE" -sS --max-time 30 --config - \
+        -H 'Accept: application/vnd.api+json' -o /dev/null -w '%{http_code}' http://app:8080/api/v1/about/user)"
+  [[ "$went" =~ ^40[13]$ ]] || fail "Firefly III still takes the old token $((i + 1)) of 3 (HTTP $went)"
+done
+given="$(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$(compose ps -q importer)" | grep '^FIREFLY_III_ACCESS_TOKEN=' || true)"
+[ "$given" = "FIREFLY_III_ACCESS_TOKEN=$IMPORTER_FIREFLY_TOKEN" ] || fail "the importer did not start again with its new token"
+given="$(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$(compose ps -q next)" | grep '^WARMUP_FIREFLY_TOKEN=' || true)"
+[ "$given" = "WARMUP_FIREFLY_TOKEN=$NEXT_WARMUP_FIREFLY_TOKEN" ] || fail "Firefly Pocket did not start again with its new token"
+internal_http http://importer:8080/health 30 >/dev/null || fail "the importer does not answer after the rotation"
+echo "a token near its end is made again, the old one revoked, and its app started again with the new one"
 
 # By name through Caddy, as a browser asks: its own CA for *.localhost (-k),
 # from this network. The legal pages render on their host and under /legal/
