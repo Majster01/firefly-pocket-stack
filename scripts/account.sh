@@ -132,3 +132,32 @@ console_client() {
   fi
   ok "the console signs in with Firefly III: its client, $id, is $(jq -r '.client.client' <<<"$answer")"
 }
+
+# How long the console's sign-in lasts: its session, and its token in Firefly
+# III, which revokes it after that (console_tokens, and console.sh expire).
+CONSOLE_SESSION_SECONDS=28800
+
+# token_user <token>: the email of the account a token is for, as Firefly III's
+# API says; 1 when the API refuses the token, 2 when it does not answer. The
+# token goes to curl on stdin, in no command line.
+token_user() {
+  local out code
+  out="$(printf 'header = "Authorization: Bearer %s"\n' "$1" \
+    | docker run --rm -i --network "$DOCKER_NETWORK" "$CURL_IMAGE" -sS --max-time 30 --config - \
+        -H 'Accept: application/vnd.api+json' -w '\n%{http_code}' http://app:8080/api/v1/about/user 2>/dev/null)" || return 2
+  code="${out##*$'\n'}"
+  case "$code" in
+    200) jq -r '.data.attributes.email // empty' <<<"${out%$'\n'*}" 2>/dev/null ;;
+    401 | 403) return 1 ;;
+    *) return 2 ;;
+  esac
+}
+
+# console_tokens [token] [end]: the console client's tokens older than its
+# session revoked; with a token, what it is (firefly-bootstrap.php), or, with
+# end, that one revoked too. The token goes on stdin. Prints the answer.
+console_tokens() {
+  jq -Rc --arg client "${CONSOLE_CLIENT_ID:-}" --argjson age "$CONSOLE_SESSION_SECONDS" --argjson end "${2:-false}" \
+    '{console_tokens: ({client: $client, max_age: $age, end: $end} + (if . == "" then {} else {token: .} end))}' \
+    <<<"${1:-}" | bootstrap
+}

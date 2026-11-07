@@ -962,18 +962,87 @@ class ConsoleTest(unittest.TestCase):
         self.assertGreaterEqual(len(query["state"]), 24)
         session = self.signed_in_owner(fake)
         page = self.call("GET", "/", cookie=session).body.decode()
-        for want in ("<h1>Your server</h1>", "Signed in with Firefly III as you@example.com", "Bank connection",
-                     'action="/logout"'):
+        for want in ("<h1>Your server</h1>", "Signed in with Firefly III as you@example.com", 'action="/logout"',
+                     '<a href="/bank">Bank connection</a>', '<a href="/updates">Updates</a>', "eight hours"):
             self.assertIn(want, page)
-        self.assertNotIn('<a href="/bank">', page)  # no step page to go to yet
-        self.assertEqual(dict(self.call("GET", "/bank", cookie=session).headers)["Location"], "/")
+        # The Server step and the account are done: no page to change them.
+        self.assertNotIn('<a href="/server">', page)
+        self.assertNotIn('<a href="/account">', page)
         # The token was asked for with no secret, and checked against the account.
         self.assertEqual([c[2] for c in fake.calls], ["/oauth/token", "/api/v1/about/user"])
         self.assertNotIn("client_secret", fake.calls[0][3])
         self.assertEqual(fake.calls[1][4], "ff-access")
-        # Signed out: where things are, and the sign-in again.
+        # Signed out: where things are, and the sign-in again; Firefly III is
+        # asked to revoke the token.
         self.assertEqual(self.call("POST", "/logout", cookie=session).status, 303)
         self.assertIn("Setup is finished", self.call("GET", "/", cookie=session).body.decode())
+        [request] = [json.loads(f.read_text()) for f in self.requests()]
+        self.assertEqual({k: request.get(k) for k in ("action", "token", "code")},
+                         {"action": "signout", "token": "ff-access", "code": None})
+
+    def test_after_setup_the_owner_changes_steps(self):
+        self.finished_status(key=True, certificate=CERT, app_id=APP_ID)
+        session = self.signed_in_owner(FakeFirefly())
+        page = self.call("GET", "/bank", cookie=session).body.decode()
+        self.assertIn('action="/bank/key"', page)
+        self.assertIn('<nav class="steps" aria-label="Your server">', page)
+        self.assertIn('<a href="/">Your server</a>', page)
+        self.assertNotIn('href="/server"', page)
+        self.assertNotIn('href="/finish"', page)
+        self.assertEqual(self.call("GET", "/bank/certificate", cookie=session).body.decode(), CERT)
+        # A new key: the request carries the owner's Firefly III token, for the
+        # agent to check with Firefly III, and not the setup code.
+        location, request = self.request_of(self.call("POST", "/bank/key", "", cookie=session))
+        self.assertEqual(request["action"], "bank_key")
+        self.assertEqual(request["token"], "ff-access")
+        self.assertNotIn("code", request)
+        rid = location.rsplit("/", 1)[1]
+        self.assertIn(b"Making the key", self.call("GET", location, cookie=session).body)
+        self.finished_status(key=True, certificate=CERT, requests={rid: {
+            "state": "refused", "action": "bank_key", "at": "2026-11-06T12:00:00Z",
+            "message": "That sign-in is more than eight hours old"}})
+        page = self.call("GET", location, cookie=session).body.decode()
+        self.assertIn("more than eight hours old", page)
+        self.assertNotIn("Back to setup", page)
+        # The other steps' pages, and their requests, the same way.
+        for path in ("/suggestions", "/alerts", "/backups", "/updates"):
+            self.assertEqual(self.call("GET", path, cookie=session).status, 200, path)
+        location, request = self.request_of(self.call("POST", "/updates", "", cookie=session))
+        self.assertEqual((request["action"], request["token"]), ("updates", "ff-access"))
+        rid = location.rsplit("/", 1)[1]
+        self.finished_status(updates={"agent": True, "origin": ORIGIN}, requests={rid: {
+            "state": "applied", "action": "updates", "at": "2026-11-06T12:00:00Z", "message": "The deploy agent is on."}})
+        page = self.call("GET", location, cookie=session).body.decode()
+        self.assertIn('<a class="button" href="/">Your server</a>', page)
+        self.assertNotIn("Next:", page)
+        self.assertIn("Next: Your server", self.call("GET", "/updates", cookie=session).body.decode())
+        # What is done stays done: the overview.
+        for path in ("/server", "/account", "/finish", "/elsewhere"):
+            self.assertEqual(dict(self.call("GET", path, cookie=session).headers)["Location"], "/", path)
+        self.assertEqual(dict(self.call("POST", "/finish", "", cookie=session).headers)["Location"], "/")
+        self.assertEqual(len(self.requests()), 2)
+
+    def test_after_setup_nothing_changes_without_the_sign_in(self):
+        self.bank_status()
+        cookie = self.sign_in()
+        self.finished_status()
+        for path, body in (("/bank/key", ""), ("/updates", ""), ("/suggestions", "provider=anthropic&key=x")):
+            resp = self.call("POST", path, body, cookie=cookie)
+            self.assertIn("Setup is finished", resp.body.decode(), path)
+        self.assertIn("Setup is finished", self.call("GET", "/bank", cookie=cookie).body.decode())
+        self.assertEqual(self.requests(), [])
+        # Nor from another site, signed in.
+        session = self.signed_in_owner(FakeFirefly())
+        resp = self.call("POST", "/bank/key", "", cookie=session, origin="https://evil.example")
+        self.assertEqual(resp.status, 403)
+        self.assertEqual(self.requests(), [])
+
+    def test_owner_session_ends_after_eight_hours(self):
+        self.finished_status()
+        session = self.signed_in_owner(FakeFirefly())
+        self.assertEqual(self.call("GET", "/bank", cookie=session).status, 200)
+        self.clock.now += console.SESSION_SECONDS + 1
+        self.assertIn("Setup is finished", self.call("GET", "/bank", cookie=session).body.decode())
 
     def test_sign_in_is_for_the_owner_only(self):
         self.finished_status()

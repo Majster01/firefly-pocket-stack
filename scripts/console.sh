@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# The server's half of the Firefly Pocket Console (Setup UI steps 4 to 7).
+# The server's half of the Firefly Pocket Console (Setup UI steps 4 to 8).
 #
 #     scripts/firefly-pocket console apply     apply what the console saved, then write its status
 #     scripts/firefly-pocket console status    write its status only
@@ -10,18 +10,28 @@
 #                                              registered in Firefly III (account.sh); with
 #                                              --if-missing, only when there is none yet, as
 #                                              the deploy runs it
+#     scripts/firefly-pocket console expire    revoke the console's Firefly III tokens older
+#                                              than eight hours, as the crontab does hourly
 #
 # The console (services/console) runs in a container that holds no secret but
-# the setup code and cannot reach Docker. It can add files to
+# the setup code, and after setup its owner's Firefly III token while they are
+# signed in, and cannot reach Docker. It can add files to
 # compose/console/inbox, which it cannot list, and read compose/console/status.
 # This is the only thing that reads the one and writes the other:
 #
 #   inbox/<32 hex>.json  one request, carrying the setup code, so a file another user of
 #                        this machine drops in does nothing. The code works until setup is
 #                        finished: until the console's Finish, or the wizard's, removes it.
-#                        From then on the console has no say, until it signs in with
-#                        Firefly III (Setup UI step 8). Before Firefly III has its account
-#                        (the importer's token, which opens the gate), two kinds:
+#                        From then on a request carries, in place of "code", the "token"
+#                        Firefly III gave the console when its owner signed in (Setup UI
+#                        step 8), and is applied only once Firefly III's API takes that
+#                        token as SITE_OWNER's, and it is the console client's and less than
+#                        eight hours old (_owner). After setup, the bank to updates requests
+#                        below, and one more:
+#       {"action": "signout", "token": "..."}
+#                        the console's Sign out: Firefly III revokes that token
+#                        Before Firefly III has its account (the importer's token, which
+#                        opens the gate), two kinds:
 #       {"action": "server", "code": "...", "settings": {"DOMAIN": "...", "SITE_OWNER": "...",
 #        "LEGAL_OWNER_NAME": "...", "TZ": "..."}}
 #                        those four settings and no other; each value is checked as config
@@ -275,27 +285,54 @@ follow() {
 
 # apply_one <id> <file>: 0 when Caddy and the console need starting again.
 apply_one() {
-  local id="$1" file="$2" code given
-  ACTION=""
-  if setup_done; then
-    result "$id" refused "Setup is finished, so the console changes nothing now. On the server: scripts/firefly-pocket setup <step>"
-    return 1
-  fi
+  local id="$1" file="$2" code given token
   ACTION="$(jq -r 'if type == "object" and (.action | type) == "string" then .action else "" end' <"$file" 2>/dev/null || true)"
   case "$ACTION" in
-    server | account | bank_key | bank | suggestions | ntfy | ntfy_test | healthchecks | backups | updates | finish) ;;
+    server | account | bank_key | bank | suggestions | ntfy | ntfy_test | healthchecks | backups | updates | finish | signout) ;;
     *)
       ACTION=""
       result "$id" refused "Not a request this version of the server knows."
       return 1
       ;;
   esac
-  # Compared here, not by jq: an argument would show the code to every user of this machine.
-  code="$(env_value SETUP_CODE)"
-  given="$(jq -r '.code | strings' <"$file" 2>/dev/null || true)"
-  if [ -z "$code" ] || [ "$given" != "${code//-/}" ]; then
-    result "$id" refused "Not this server's setup code: the request did not come from its console."
-    return 1
+  if setup_done; then
+    # From here on, the console signed in with Firefly III, as its owner.
+    case "$ACTION" in
+      server | account | finish)
+        result "$id" refused "Setup is finished, and that step with it. To change the domain or your details, on the server: scripts/firefly-pocket setup domain, or setup you"
+        return 1
+        ;;
+    esac
+    token="$(jq -r '.token | strings' <"$file" 2>/dev/null || true)"
+    if [ -z "$token" ]; then
+      result "$id" refused "Setup is finished, so the console changes something only once you sign in to it with Firefly III."
+      return 1
+    fi
+    # A JWT: anything else goes nowhere near curl's or PHP's input.
+    if [ "${#token}" -gt 8192 ] || [[ ! "$token" =~ ^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$ ]]; then
+      result "$id" refused "Not a sign-in from this server's console."
+      return 1
+    fi
+    if [ "$ACTION" = signout ]; then
+      if child owner end <<<"$token"; then result "$id" applied "$MESSAGE"; else owner_refused "$id"; fi
+      return 1
+    fi
+    if ! child owner check <<<"$token"; then
+      owner_refused "$id"
+      return 1
+    fi
+  else
+    if [ "$ACTION" = signout ]; then
+      result "$id" refused "Signing in with Firefly III starts once setup is finished."
+      return 1
+    fi
+    # Compared here, not by jq: an argument would show the code to every user of this machine.
+    code="$(env_value SETUP_CODE)"
+    given="$(jq -r '.code | strings' <"$file" 2>/dev/null || true)"
+    if [ -z "$code" ] || [ "$given" != "${code//-/}" ]; then
+      result "$id" refused "Not this server's setup code: the request did not come from its console."
+      return 1
+    fi
   fi
   # The steps in their order: the Server step and the account until the
   # account exists, the bank step and Finish after.
@@ -317,6 +354,16 @@ apply_one() {
   "apply_$ACTION" "$id" "$file"
 }
 
+# owner_refused <id>: what child owner said, as the request's outcome: refused
+# when it said no (exit 2), failed when it could not tell.
+owner_refused() {
+  if [ "$CHILD_RC" -eq 2 ]; then
+    result "$1" refused "$MESSAGE"
+  else
+    result "$1" failed "${MESSAGE:-The server could not ask Firefly III about your sign-in; the journal has why (journalctl -u firefly-pocket-console)}"
+  fi
+}
+
 # child <name> [args...]: console.sh _<name> in a process of its own, so that
 # set -e stops it at the first failure; stdin goes to it. What it says goes to
 # the journal as it says it, and MESSAGE is its last "FATAL: " line, or else its
@@ -328,8 +375,10 @@ child() {
   MESSAGE="$(sed -n 's/^FATAL: //p' "$log" | tail -n 1)"
   [ "$rc" -ne 0 ] || MESSAGE="$(sed -n 's/^DONE: //p' "$log" | tail -n 1)"
   rm -f "$log"
+  CHILD_RC="$rc"
   return "$rc"
 }
+CHILD_RC=0
 
 # apply_server <id> <file>: 0 when it changed a setting.
 apply_server() {
@@ -800,6 +849,64 @@ cmd_client() {
   write_status
 }
 
+# console.sh _owner <check|end>, the token on stdin: whether a request after
+# setup comes from the console signed in as Firefly III's owner. check: the API
+# takes the token, it is SITE_OWNER's, and it is the console client's, from the
+# last eight hours; refused (exit 2) otherwise. end: that token revoked, as the
+# console's Sign out asks. Either way the client's older tokens are revoked.
+cmd_owner() {
+  local token="" email answer said
+  IFS= read -r token || [ -n "$token" ] || refuse "Not a sign-in from this server's console."
+  # shellcheck source=lib.sh
+  source "$REPO_ROOT/scripts/lib.sh"
+  # shellcheck source=account.sh
+  source "$REPO_ROOT/scripts/account.sh"
+  [ -n "${CONSOLE_CLIENT_ID:-}" ] \
+    || refuse "The console has no sign-in client on this server. On the server: scripts/firefly-pocket console client"
+  if [ "$1" = end ]; then
+    answer="$(console_tokens "$token" true)"
+    token=""
+    said="$(jq -r '.console_tokens.token' <<<"$answer")"
+    case "$said" in
+      ended | old | revoked) echo "DONE: Signed out: Firefly III takes the console's token no more." ;;
+      *) refuse "Not a sign-in from this server's console." ;;
+    esac
+    return 0
+  fi
+  local rc=0
+  email="$(token_user "$token")" || rc=$?
+  case "$rc" in
+    0) ;;
+    1) refuse "Firefly III no longer takes this sign-in: sign out of the console, and in again." ;;
+    *) die "Firefly III did not answer, so the server could not check your sign-in. Try again in a minute." ;;
+  esac
+  if [ -z "$email" ] || [ "${email,,}" != "${SITE_OWNER,,}" ]; then
+    refuse "Signed in to Firefly III as ${email:-someone it did not name}, and the console is only for $SITE_OWNER."
+  fi
+  answer="$(console_tokens "$token")"
+  token=""
+  said="$(jq -r '.console_tokens.token' <<<"$answer")"
+  case "$said" in
+    current) echo "DONE: Signed in with Firefly III as $email." ;;
+    old) refuse "That sign-in is more than eight hours old, and Firefly III takes it no more: sign out of the console, and in again." ;;
+    revoked) refuse "That sign-in has ended: sign out of the console, and in again." ;;
+    *) refuse "Not a sign-in from this server's console: another app's token for your account." ;;
+  esac
+}
+
+# console.sh expire: the console's tokens older than its session revoked, as
+# the crontab does every hour. Nothing to do before the client exists.
+cmd_expire() {
+  local answer
+  if ! account_made || [ -z "$(stored CONSOLE_CLIENT_ID)" ]; then return 0; fi
+  # shellcheck source=lib.sh
+  source "$REPO_ROOT/scripts/lib.sh"
+  # shellcheck source=account.sh
+  source "$REPO_ROOT/scripts/account.sh"
+  answer="$(console_tokens)"
+  ok "the console's sign-ins older than eight hours: $(jq -r '.console_tokens.expired' <<<"$answer") revoked"
+}
+
 cmd_apply() {
   console_dirs
   exec 9>"$LOCK_FILE"
@@ -879,12 +986,14 @@ case "${1:-}" in
   status) write_status ;;
   install) cmd_install ;;
   client) cmd_client "${2:-}" ;;
+  expire) cmd_expire ;;
+  _owner) cmd_owner "${2:?}" ;;
   _account) cmd_account "${2:?}" ;;
   _bank_key) cmd_bank_key ;;
   _bank) cmd_bank "${2:?}" ;;
   _names) cmd_names ;;
   *)
-    sed -n '3,13s/^# \{0,1\}//p' "${BASH_SOURCE[0]}" >&2
+    sed -n '3,15s/^# \{0,1\}//p' "${BASH_SOURCE[0]}" >&2
     exit 2
     ;;
 esac

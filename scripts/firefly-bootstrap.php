@@ -17,13 +17,20 @@
  *                     client with PKCE and no secret (public), registered once by its
  *                     name; run again, it keeps the client and moves it to the
  *                     redirect URL given, as after a change of domain
+ *   console_tokens    {"client": "<its ID>", "max_age": 28800, "token": "...", "end": true}
+ *                     the tokens Firefly III gave that client: every one older than
+ *                     max_age seconds revoked, with its refresh tokens. With a token
+ *                     (one the API took already: this reads only its ID), what it is:
+ *                     current, old (revoked now, by its age), revoked, other (another
+ *                     client's) or unknown; with end, a current one is revoked: ended
  *
  * Every step can run again. The answer is one line on stdout, after the marker
  * below, so that log lines Firefly III prints on the way cannot be mistaken for it:
  *
  *   FIREFLY_POCKET_BOOTSTRAP {"users": 0, "user": "created", "email": "...",
  *                             "tokens": {"<name>": {"token": "...", "expires_at": "..."}},
- *                             "client": {"id": "...", "client": "created" or "kept"}}
+ *                             "client": {"id": "...", "client": "created" or "kept"},
+ *                             "console_tokens": {"expired": 0, "token": "current"}}
  *
  * users is how many accounts there were before. It uses Firefly III's internal
  * classes, which a release can change: the boot test runs it on every new
@@ -113,6 +120,46 @@ try {
             $value  = 'redirect_uris' === $column ? json_encode([$target]) : $target;
             DB::table('oauth_clients')->where('id', $existing->id)->update([$column => $value]);
             $out['client'] = ['id' => (string) $existing->id, 'client' => 'kept'];
+        }
+    }
+    // 5. The console's sessions: Firefly III gives its tokens a year, and the
+    //    console needs one for eight hours, as long as it keeps its session.
+    $session = is_array($in['console_tokens'] ?? null) ? $in['console_tokens'] : [];
+    $cid     = is_scalar($session['client'] ?? null) ? (string) $session['client'] : '';
+    if ('' !== $cid) {
+        $revoke = function (array $ids): void {
+            if ([] === $ids) {
+                return;
+            }
+            DB::table('oauth_access_tokens')->whereIn('id', $ids)->update(['revoked' => true]);
+            if (Schema::hasTable('oauth_refresh_tokens')) {
+                DB::table('oauth_refresh_tokens')->whereIn('access_token_id', $ids)->update(['revoked' => true]);
+            }
+        };
+        $maxAge = max(60, (int) ($session['max_age'] ?? 28800));
+        $old    = DB::table('oauth_access_tokens')->where('client_id', $cid)->where('revoked', false)
+            ->where('created_at', '<', now()->subSeconds($maxAge))->pluck('id')->map(fn ($id) => (string) $id)->all();
+        $revoke($old);
+        $out['console_tokens'] = ['expired' => count($old)];
+        $token = is_string($session['token'] ?? null) ? $session['token'] : '';
+        if ('' !== $token) {
+            // Its ID, the JWT's jti: the API checked its signature already.
+            $parts  = explode('.', $token);
+            $claims = 3 === count($parts) ? json_decode((string) base64_decode(strtr($parts[1], '-_', '+/'), false), true) : null;
+            $jti    = is_array($claims) && is_string($claims['jti'] ?? null) ? $claims['jti'] : '';
+            $row    = '' !== $jti ? DB::table('oauth_access_tokens')->where('id', $jti)->first() : null;
+            $state  = match (true) {
+                null === $row                     => 'unknown',
+                (string) $row->client_id !== $cid => 'other',
+                in_array($jti, $old, true)        => 'old',
+                (bool) $row->revoked              => 'revoked',
+                default                           => 'current',
+            };
+            if ('current' === $state && true === ($session['end'] ?? false)) {
+                $revoke([$jti]);
+                $state = 'ended';
+            }
+            $out['console_tokens']['token'] = $state;
         }
     }
     answer($out);
