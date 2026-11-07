@@ -25,9 +25,10 @@
 #   6. a server whose .env is still edited by hand: config import, as yours
 #      runs it once, and up -d again, which must recreate nothing: every value
 #      is still the same
-#   7. the console's sign-in client, as the deploy registers it once on a server
-#      set up before it (console client --if-missing): made in Firefly III's
-#      database as it is, and kept when asked again
+#   7. the sign-in clients of the console and of Firefly Pocket, as the deploy
+#      registers them once on a server set up before them (console client
+#      --if-missing): made in Firefly III's database as it is, Firefly Pocket
+#      started again with its own, and both kept when asked again
 #
 # Needs Docker. Never for the server: like boot-test.sh, it uses the server's
 # names, and refuses where a compose/.env exists.
@@ -134,17 +135,23 @@ if [ -z "$carried" ]; then
   echo "every service runs on as it was"
 fi
 
-echo "==> the console's sign-in client, as the deploy registers it on a server set up before it"
-if [ -z "$(scripts/firefly-pocket config get CONSOLE_CLIENT_ID 2>/dev/null)" ]; then
+echo "==> the sign-in clients, as the deploy registers them on a server set up before them"
+if [ -z "$(scripts/firefly-pocket config get CONSOLE_CLIENT_ID 2>/dev/null)" ] \
+   || [ -z "$(scripts/firefly-pocket config get POCKET_CLIENT_ID 2>/dev/null)" ]; then
   scripts/firefly-pocket console client --if-missing
   id="$(scripts/firefly-pocket config get CONSOLE_CLIENT_ID)"
   [ -n "$id" ] || { echo "CONSOLE_CLIENT_ID was not kept"; exit 1; }
   [ "$(jq -r .signin.client_id compose/console/status/status.json)" = "$id" ] \
     || { echo "the console's status does not carry the client"; exit 1; }
+  pocket="$(scripts/firefly-pocket config get POCKET_CLIENT_ID)"
+  [ -n "$pocket" ] && [ "$pocket" != "$id" ] || { echo "POCKET_CLIENT_ID was not kept, or is the console's"; exit 1; }
+  given="$(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$(compose ps -q next)" | grep '^FIREFLY_CLIENT_ID=' || true)"
+  [ "$given" = "FIREFLY_CLIENT_ID=$pocket" ] || { echo "Firefly Pocket did not start again with its client: \"$given\""; exit 1; }
   scripts/firefly-pocket console client | tee "$old/client.out"
-  grep -q "its client, $id, is kept" "$old/client.out" || { echo "asked again, the client was not kept"; exit 1; }
+  grep -q "its client, $id, is kept" "$old/client.out" || { echo "asked again, the console's client was not kept"; exit 1; }
+  grep -q "its client, $pocket, is kept" "$old/client.out" || { echo "asked again, Firefly Pocket's client was not kept"; exit 1; }
 else
-  echo "$from registered it already"
+  echo "$from registered them already"
 fi
 
 echo "==> upgraded from $from and checked"

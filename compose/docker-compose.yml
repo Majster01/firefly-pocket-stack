@@ -277,6 +277,12 @@ services:
       # "Caching"). Empty = off. Firefly's webhooks are off here, so changes
       # made outside Pocket reach its cache only through the TTL.
       WARMUP_FIREFLY_TOKEN: ${NEXT_WARMUP_FIREFLY_TOKEN:-}
+      # Sign in with Firefly III (Setup UI step 11): the browser signs in on
+      # Firefly III's own login, at its public address, and Pocket's server
+      # swaps the code for a token on this network. Offered only once setup has
+      # registered Pocket's public client (scripts/account.sh, pocket_client).
+      FIREFLY_PUBLIC_URL: https://${FIREFLY_HOSTNAME:-firefly.${DOMAIN:-}}
+      FIREFLY_CLIENT_ID: ${POCKET_CLIENT_ID:-}
     depends_on:
       db:
         condition: service_healthy
