@@ -195,6 +195,10 @@ class ConsoleTest(unittest.TestCase):
         resp = self.call("GET", "/console.css")
         self.assertEqual(resp.status, 200)
         self.assertIn("text/css", resp.content_type)
+        # The page's policy allows this file and nothing else: no url() or @import in it.
+        css = resp.body.decode()
+        self.assertNotIn("url(", css)
+        self.assertNotIn("@import", css)
 
     def test_asks_for_the_code(self):
         resp = self.call("GET", "/")
@@ -202,6 +206,7 @@ class ConsoleTest(unittest.TestCase):
         self.assertIn(b'name="code"', resp.body)
         # Every other page too, until signed in.
         self.assertIn(b'name="code"', self.call("GET", "/server").body)
+        self.assertNotIn(b"<nav", resp.body)
 
     def test_right_code_in_any_spelling(self):
         resp = self.call("POST", "/login", "code=7k2m+q9tb+oxh4+pvra")
@@ -317,6 +322,56 @@ class ConsoleTest(unittest.TestCase):
         self.assertEqual(done.status, 200)
         self.assertIn(b"Saved: your name and the timezone.", done.body)
         self.assertIn(b'href="/account"', done.body)
+        # The step navigation stays in view while it works and after: on Server, the step the request belongs to.
+        for page in (waiting, done):
+            self.assertIn(b'<nav class="steps" aria-label="Setup steps">', page.body)
+        self.assertIn(b'<li class="now" aria-current="step">Server</li>', done.body)
+        self.assertIn(b"Step 1 of 8", done.body)
+
+    def test_every_step_page_has_its_nav(self):
+        # Each step's page, in every state it renders (account made or not), has the navigation on that step.
+        cookie = self.sign_in()
+        for state in ({}, {"account": True}):
+            self.write_status(**state)
+            for i, (name, path) in enumerate(console.STEPS):
+                resp = self.call("GET", path, cookie=cookie)
+                self.assertIn(resp.status, (200, 409), path)
+                self.assertIn(f'<li class="now" aria-current="step">{name}</li>'.encode(), resp.body, (path, state))
+                self.assertIn(f"Step {i + 1} of 8".encode(), resp.body)
+
+    def test_a_request_page_shows_the_step_it_belongs_to(self):
+        # Alerts has three requests; the navigation is on Alerts for each, and Bank's key is on Bank.
+        for action, state, step in (("ntfy", "applied", "Alerts"), ("ntfy_test", "applied", "Alerts"),
+                                    ("healthchecks", "applied", "Alerts"), ("suggestions", "applied", "Suggestions"),
+                                    ("bank_key", "refused", "Bank connection"), ("backups", "failed", "Backups")):
+            self.write_status(requests={"ab" * 16: {"state": state, "action": action, "message": "ok",
+                                                    "at": "2026-11-06T12:00:00Z"}})
+            page = self.call("GET", f"/requests/{'ab' * 16}", cookie=self.sign_in()).body.decode()
+            self.assertIn(f'<li class="now" aria-current="step">{step}</li>', page, action)
+
+    def test_a_running_request_that_stopped_keeps_its_nav(self):
+        self.write_status(requests={"ab" * 16: {"state": "running", "action": "ntfy",
+                                                "message": "Sending", "at": "2026-11-06T12:00:00Z"}})
+        self.clock.now = datetime(2026, 11, 6, 12, tzinfo=timezone.utc).timestamp() + console.STALE_SECONDS + 60
+        page = self.call("GET", f"/requests/{'ab' * 16}", cookie=self.sign_in()).body.decode()
+        self.assertIn("stopped working on it", page)
+        self.assertIn('<li class="now" aria-current="step">Alerts</li>', page)
+
+    def test_a_refused_finish_keeps_its_nav(self):
+        # Only an applied Finish restarts the console: after a refusal the steps' links still work.
+        self.write_status(requests={"ab" * 16: {"state": "refused", "action": "finish", "message": "No.",
+                                                "at": "2026-11-06T12:00:00Z"}})
+        page = self.call("GET", f"/requests/{'ab' * 16}", cookie=self.sign_in()).body.decode()
+        self.assertIn("Not finished", page)
+        self.assertIn('<li class="now" aria-current="step">Finish</li>', page)
+
+    def test_finishing_has_no_step_navigation(self):
+        # The console starts again without the code: the steps' links would lead nowhere.
+        self.write_status(requests={"ab" * 16: {"state": "applied", "action": "finish", "message": "Done.",
+                                                "at": "2026-11-06T12:00:00Z"}})
+        page = self.call("GET", f"/requests/{'ab' * 16}", cookie=self.sign_in()).body
+        self.assertIn(b"open it again", page)
+        self.assertNotIn(b"<nav", page)
 
     def test_a_refused_request(self):
         self.write_status(requests={"ab" * 16: {"state": "refused", "message": "TZ: an IANA timezone",
@@ -324,6 +379,7 @@ class ConsoleTest(unittest.TestCase):
         resp = self.call("GET", f"/requests/{'ab' * 16}", cookie=self.sign_in())
         self.assertIn(b"Not saved", resp.body)
         self.assertIn(b"TZ: an IANA timezone", resp.body)
+        self.assertIn(b'<li class="now" aria-current="step">Server</li>', resp.body)
 
     def test_a_new_domain_moves_the_console(self):
         self.write_status()
@@ -334,9 +390,12 @@ class ConsoleTest(unittest.TestCase):
         self.assertEqual(page.status, 202)
         self.assertIn(b"https://admin.pocket.example.org/", page.body)
         self.assertNotIn(b'http-equiv="refresh"', page.body)
+        self.assertNotIn(b"<nav", page.body)  # this host goes away: the steps' links would fail
 
     def test_unknown_request(self):
-        self.assertEqual(self.call("GET", f"/requests/{'0' * 32}", cookie=self.sign_in()).status, 404)
+        resp = self.call("GET", f"/requests/{'0' * 32}", cookie=self.sign_in())
+        self.assertEqual(resp.status, 404)
+        self.assertNotIn(b"<nav", resp.body)
 
     def test_inbox_not_writable(self):
         self.inbox.rmdir()
@@ -945,6 +1004,7 @@ class ConsoleTest(unittest.TestCase):
         page = self.call("GET", "/", app=self.make(code="")).body.decode()
         self.assertIn("Setup is finished", page)
         self.assertIn('href="/signin"', page)
+        self.assertNotIn("<nav", page)
         self.finished_status(client_id="")
         page = self.call("GET", "/", app=self.make(code="")).body.decode()
         self.assertIn("console client", page)
@@ -965,6 +1025,7 @@ class ConsoleTest(unittest.TestCase):
         for want in ("<h1>Your server</h1>", "Signed in with Firefly III as you@example.com", 'action="/logout"',
                      '<a href="/bank">Bank connection</a>', '<a href="/updates">Updates</a>', "eight hours"):
             self.assertIn(want, page)
+        self.assertIn('<li class="now" aria-current="page">Your server</li>', page)
         # The Server step and the account are done: no page to change them.
         self.assertNotIn('<a href="/server">', page)
         self.assertNotIn('<a href="/account">', page)
@@ -1003,6 +1064,13 @@ class ConsoleTest(unittest.TestCase):
             "message": "That sign-in is more than eight hours old"}})
         page = self.call("GET", location, cookie=session).body.decode()
         self.assertIn("more than eight hours old", page)
+        self.assertIn('<nav class="steps" aria-label="Your server">', page)
+        self.assertIn('<li class="now" aria-current="page">Bank connection</li>', page)
+        # An old Server request, opened after setup: the overview is the current item.
+        self.finished_status(requests={rid: {"state": "applied", "action": "server", "message": "Saved.",
+                                             "at": "2026-11-06T12:00:00Z"}})
+        page = self.call("GET", location, cookie=session).body.decode()
+        self.assertIn('<li class="now" aria-current="page">Your server</li>', page)
         self.assertNotIn("Back to setup", page)
         # The other steps' pages, and their requests, the same way.
         for path in ("/suggestions", "/alerts", "/backups", "/updates"):
