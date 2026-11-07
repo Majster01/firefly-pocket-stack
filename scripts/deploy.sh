@@ -171,11 +171,11 @@ if caddyfile_changed; then
 fi
 step "install the crontab" crontab "$REPO_ROOT/crontab"
 step "smoke test" smoke_test
-# The console's "Sign in with Firefly III" client, on a server set up before it
-# existed. Once, and never stops a deploy.
-if [ -n "${IMPORTER_FIREFLY_TOKEN:-}" ] && [ -z "${CONSOLE_CLIENT_ID:-}" ]; then
+# The "Sign in with Firefly III" clients of the console and of Firefly Pocket,
+# on a server set up before they existed. Once, and never stops a deploy.
+if [ -n "${IMPORTER_FIREFLY_TOKEN:-}" ] && { [ -z "${CONSOLE_CLIENT_ID:-}" ] || [ -z "${POCKET_CLIENT_ID:-}" ]; }; then
   "$REPO_ROOT/scripts/console.sh" client --if-missing \
-    || echo "WARN: could not register the console's sign-in client (exit $?)" >&2
+    || echo "WARN: could not register the sign-in clients (exit $?)" >&2
 fi
 
 echo "$new" > "$DEPLOYED_FILE"

@@ -112,25 +112,44 @@ make_tokens() {
   registration closed || die "Firefly III's /register still shows its form"
   ok "/register is closed: no one else can make an account"
   console_client
+  pocket_client
 }
 
-# console_client: the console's "Sign in with Firefly III" client, registered
-# inside Firefly III, or moved to this domain's redirect URL, and its ID kept
-# as CONSOLE_CLIENT_ID. Public: the console holds no secret (firefly-bootstrap.php).
-CONSOLE_CLIENT_NAME="Firefly Pocket Console"
-console_client() {
-  local answer id
-  answer="$(jq -nc --arg name "$CONSOLE_CLIENT_NAME" --arg redirect "https://$ADMIN_HOSTNAME/oauth/callback" \
-    '{client: {name: $name, redirect: $redirect}}' | bootstrap)"
+# register_client <name> <redirect URL> <setting> <who>: a "Sign in with Firefly
+# III" client, registered inside Firefly III by that name, or moved to this
+# domain's redirect URL, and its ID kept in the setting. Public: whoever signs
+# in with it holds no secret, PKCE stands in for one (firefly-bootstrap.php).
+# CLIENT_CHANGED is 1 when the setting changed.
+# shellcheck disable=SC2034  # CLIENT_CHANGED is the caller's (console.sh)
+register_client() {
+  local name="$1" redirect="$2" key="$3" who="$4" answer id
+  CLIENT_CHANGED=0
+  answer="$(jq -nc --arg name "$name" --arg redirect "$redirect" '{client: {name: $name, redirect: $redirect}}' | bootstrap)"
   id="$(jq -r '.client.id // empty' <<<"$answer")"
-  [ -n "$id" ] || die "Firefly III registered no client for the console"
-  if [ "$id" != "${CONSOLE_CLIENT_ID:-}" ]; then
-    "$FP" config set --no-render CONSOLE_CLIENT_ID - <<<"$id" >/dev/null || die "CONSOLE_CLIENT_ID does not take $id"
+  [ -n "$id" ] || die "Firefly III registered no client for $who"
+  if [ "$id" != "${!key:-}" ]; then
+    "$FP" config set --no-render "$key" - <<<"$id" >/dev/null || die "$key does not take $id"
     "$FP" config render >/dev/null
     # shellcheck source=lib.sh
     source "$REPO_ROOT/scripts/lib.sh"
+    CLIENT_CHANGED=1
   fi
-  ok "the console signs in with Firefly III: its client, $id, is $(jq -r '.client.client' <<<"$answer")"
+  ok "$who signs in with Firefly III: its client, $id, is $(jq -r '.client.client' <<<"$answer")"
+}
+
+# console_client: the console's client (Setup UI step 8), as CONSOLE_CLIENT_ID.
+CONSOLE_CLIENT_NAME="Firefly Pocket Console"
+console_client() {
+  register_client "$CONSOLE_CLIENT_NAME" "https://$ADMIN_HOSTNAME/oauth/callback" CONSOLE_CLIENT_ID "the console"
+}
+
+# pocket_client: Firefly Pocket's client (Setup UI step 11), as POCKET_CLIENT_ID,
+# which compose hands to Pocket as FIREFLY_CLIENT_ID: with it, a new device
+# signs in instead of pasting a token. Firefly III shows the name when it asks
+# whether to let it in.
+POCKET_CLIENT_NAME="Firefly Pocket"
+pocket_client() {
+  register_client "$POCKET_CLIENT_NAME" "https://$NEXT_HOSTNAME/oauth/callback" POCKET_CLIENT_ID "Firefly Pocket"
 }
 
 # How long the console's sign-in lasts: its session, and its token in Firefly

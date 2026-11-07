@@ -6,10 +6,11 @@
 #     scripts/firefly-pocket console status    write its status only
 #     scripts/firefly-pocket console install   the systemd units that run apply as soon as the
 #                                              console saves something (uses sudo)
-#     scripts/firefly-pocket console client    the console's "Sign in with Firefly III" client,
-#                                              registered in Firefly III (account.sh); with
-#                                              --if-missing, only when there is none yet, as
-#                                              the deploy runs it
+#     scripts/firefly-pocket console client    the "Sign in with Firefly III" clients of the
+#                                              console and of Firefly Pocket, registered in
+#                                              Firefly III (account.sh); with --if-missing,
+#                                              only when one is not there yet, as the deploy
+#                                              runs it
 #     scripts/firefly-pocket console expire    revoke the console's Firefly III tokens older
 #                                              than eight hours, as the crontab does hourly
 #
@@ -839,13 +840,21 @@ cmd_bank() {
 # console.sh client [--if-missing]: the console's sign-in client (account.sh),
 # once Firefly III has its account; then the status, which carries its ID.
 cmd_client() {
-  account_made || die "Firefly III has no account yet: the account step registers the client"
-  [ "${1:-}" != --if-missing ] || [ -z "$(stored CONSOLE_CLIENT_ID)" ] || return 0
+  account_made || die "Firefly III has no account yet: the account step registers the clients"
+  if [ "${1:-}" = --if-missing ] && [ -n "$(stored CONSOLE_CLIENT_ID)" ] && [ -n "$(stored POCKET_CLIENT_ID)" ]; then
+    return 0
+  fi
   # shellcheck source=lib.sh
   source "$REPO_ROOT/scripts/lib.sh"
   # shellcheck source=account.sh
   source "$REPO_ROOT/scripts/account.sh"
   console_client
+  pocket_client
+  # Pocket reads its client from compose: start it again with the new one.
+  if [ "$CLIENT_CHANGED" = 1 ]; then
+    compose up -d --no-build next >/dev/null
+    ok "Firefly Pocket started again with its client"
+  fi
   write_status
 }
 
@@ -993,7 +1002,7 @@ case "${1:-}" in
   _bank) cmd_bank "${2:?}" ;;
   _names) cmd_names ;;
   *)
-    sed -n '3,15s/^# \{0,1\}//p' "${BASH_SOURCE[0]}" >&2
+    sed -n '3,16s/^# \{0,1\}//p' "${BASH_SOURCE[0]}" >&2
     exit 2
     ;;
 esac

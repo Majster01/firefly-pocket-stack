@@ -70,7 +70,10 @@
 #      leaves Firefly III taking none of the console's tokens, and the importer's
 #      pages shut. After setup, a request with no token, the old code, another
 #      app's token or a malformed one is refused; and console expire revokes a
-#      sign-in made nine hours old. Then the apps' tokens, as the nightly run
+#      sign-in made nine hours old. Then Firefly Pocket's own sign-in with
+#      Firefly III, as its page does it in a browser: with PKCE, back to its
+#      /oauth/callback, and the code swapped by its server for a token that
+#      works, once, and only with the browser's verifier. Then the apps' tokens, as the nightly run
 #      rotates them: none due with a year left, all three made again when due,
 #      the old ones refused, and the importer and Firefly Pocket started again
 #      with the new ones
@@ -681,17 +684,70 @@ def go(url, form=None):
     sys.exit("too many redirects")
 
 
-status, page, url = go(f"https://{admin}/signin")
-if not url.startswith(f"https://{firefly}/login"):
-    sys.exit(f"the sign-in did not reach Firefly III's login page: {status} {url}")
-token = re.search(r'name="_token" value="([^"]+)"', page).group(1)
-status, page, url = go(f"https://{firefly}/login", {"_token": token, "email": email, "password": password})
-if url.startswith(f"https://{firefly}/oauth/authorize"):
-    # Firefly III asks once whether to let the console in: the first form approves.
-    approve = page.split("</form>")[0]
-    form = {re.search(r'name="([^"]+)"', i).group(1): html.unescape(re.search(r'value="([^"]*)"', i).group(1))
-            for i in re.findall(r"<input[^>]*>", approve) if 'name="' in i and 'value="' in i}
-    status, page, url = go(f"https://{firefly}/oauth/authorize", form)
+def through_firefly(start):
+    """From a URL that leads to Firefly III's login: signed in there, and on wherever it sends the browser after."""
+    status, page, url = go(start)
+    if not url.startswith(f"https://{firefly}/login"):
+        sys.exit(f"the sign-in did not reach Firefly III's login page: {status} {url}")
+    token = re.search(r'name="_token" value="([^"]+)"', page).group(1)
+    status, page, url = go(f"https://{firefly}/login", {"_token": token, "email": email, "password": password})
+    if url.startswith(f"https://{firefly}/oauth/authorize"):
+        # Firefly III asks once per client whether to let it in: the first form approves.
+        approve = page.split("</form>")[0]
+        form = {re.search(r'name="([^"]+)"', i).group(1): html.unescape(re.search(r'value="([^"]*)"', i).group(1))
+                for i in re.findall(r"<input[^>]*>", approve) if 'name="' in i and 'value="' in i}
+        status, page, url = go(f"https://{firefly}/oauth/authorize", form)
+    return status, page, url
+
+
+if sys.argv[4:5] == ["pocket"]:
+    # pocket <Pocket's host>: Firefly Pocket's "Sign in with Firefly III", as its page does it in the browser
+    # (lib/signin.js): the offer, Firefly III's login with a PKCE challenge, back to /oauth/callback, and the code
+    # swapped for a token by Pocket's server. Then the token at Pocket's /api/user.
+    import base64, hashlib, json, secrets
+    app = sys.argv[5]
+    with opener.open(f"https://{app}/api/signin") as r:
+        offer = json.load(r)
+    if not offer.get("available") or offer.get("redirect_uri") != f"https://{app}/oauth/callback" \
+            or offer.get("authorize_url") != f"https://{firefly}/oauth/authorize":
+        sys.exit(f"Firefly Pocket does not offer the sign-in as it should: {offer}")
+    verifier = secrets.token_urlsafe(48)
+    challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).rstrip(b"=").decode()
+    state = secrets.token_urlsafe(24)
+    query = urllib.parse.urlencode({"client_id": offer["client_id"], "redirect_uri": offer["redirect_uri"],
+                                    "response_type": "code", "scope": "", "state": state,
+                                    "code_challenge": challenge, "code_challenge_method": "S256"})
+    status, page, url = through_firefly(f"{offer['authorize_url']}?{query}")
+    back = urllib.parse.urlsplit(url)
+    sent = dict(urllib.parse.parse_qsl(back.query))
+    if f"{back.scheme}://{back.netloc}{back.path}" != offer["redirect_uri"] or sent.get("state") != state or not sent.get("code"):
+        sys.exit(f"Firefly III did not send the browser back to Pocket with a code: {status} {url.split('?')[0]}")
+    print("BACK AT", offer["redirect_uri"], status)
+
+    def swap(code, code_verifier):
+        request = urllib.request.Request(f"https://{app}/api/signin/token", method="POST",
+                                         data=json.dumps({"code": code, "code_verifier": code_verifier}).encode(),
+                                         headers={"Content-Type": "application/json", "Accept": "application/json"})
+        try:
+            with opener.open(request) as r:
+                return r.status, json.load(r)
+        except urllib.error.HTTPError as e:
+            return e.code, json.loads(e.read() or b"{}")
+
+    # The code is worth nothing without the browser's verifier, and is spent once used.
+    print("WRONG VERIFIER", swap(sent["code"], secrets.token_urlsafe(48))[0])
+    status, answer = swap(sent["code"], verifier)
+    print("SWAPPED", status, "token" in answer)
+    print("AGAIN", swap(sent["code"], verifier)[0])
+    if status != 200 or not answer.get("token"):
+        sys.exit(f"Pocket's server did not swap the code for a token: {status} {answer}")
+    with opener.open(urllib.request.Request(f"https://{app}/api/user", headers={
+            "Authorization": f"Bearer {answer['token']}", "Accept": "application/json"})) as r:
+        user = json.load(r)
+    print("POCKET SIGNED IN AS " + user.get("data", {}).get("attributes", {}).get("email", "nobody"))
+    sys.exit(0)
+
+status, page, url = through_firefly(f"https://{admin}/signin")
 print(status, url)
 print("SIGNED IN AS " + email if f"Signed in with Firefly III as {email}" in page else page[-1500:])
 if not rotate:
@@ -830,6 +886,21 @@ printf '%s\n' "$expired"
 grep -Eq ' [1-9][0-9]* revoked$' <<<"$expired" || fail "console expire revoked nothing: $expired"
 [ "$(console_tokens_live)" = 0 ] || fail "Firefly III still takes a console token nine hours old"
 echo "console expire revokes the console's tokens older than eight hours"
+
+echo "==> Firefly Pocket signs a new device in with Firefly III, with no token pasted"
+pocket_client="$(scripts/firefly-pocket config get POCKET_CLIENT_ID)"
+[ -n "$pocket_client" ] && [ "$pocket_client" != "$client" ] || fail "POCKET_CLIENT_ID is not a client of Pocket's own: \"$pocket_client\""
+given="$(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$(compose ps -q next)" | grep '^FIREFLY_CLIENT_ID=' || true)"
+[ "$given" = "FIREFLY_CLIENT_ID=$pocket_client" ] || fail "Firefly Pocket runs without its client: \"$given\""
+said="$(python3 "$jar/browser.py" "$ADMIN_HOSTNAME" "$FIREFLY_HOSTNAME" ci@example.com pocket "$NEXT_HOSTNAME" <<<"$password")" \
+  || fail "Firefly Pocket's sign-in stopped: $said"
+printf '%s\n' "$said"
+grep -qx "BACK AT https://$NEXT_HOSTNAME/oauth/callback 200" <<<"$said" || fail "Firefly III did not send the browser back to Pocket's page"
+grep -qx 'WRONG VERIFIER 400' <<<"$said" || fail "Pocket's server swapped a code with another verifier: $(grep '^WRONG' <<<"$said")"
+grep -qx 'SWAPPED 200 True' <<<"$said" || fail "Pocket's server did not swap the code for a token"
+grep -qx 'AGAIN 400' <<<"$said" || fail "the same code was swapped twice: $(grep '^AGAIN' <<<"$said")"
+grep -qx 'POCKET SIGNED IN AS ci@example.com' <<<"$said" || fail "the token Pocket got is not the owner's"
+echo "a code with its verifier, once, is a token that works in Pocket; with another verifier or again, nothing"
 
 echo "==> the apps' tokens: made again near their end, each app started again with its new one"
 # What the nightly run does first (scripts/tokens.sh). A token made today has a
