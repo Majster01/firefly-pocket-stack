@@ -47,6 +47,12 @@
 # finish step, ends it. What the console saves, scripts/console.sh applies: setup
 # web installs the systemd unit that runs it, unless FIREFLY_POCKET_NO_SYSTEMD is
 # set (CI).
+#
+# After setup, a step changes either way: here, by running it again, or in the
+# console, signed in with Firefly III as its account's owner (Setup UI step 8),
+# whose bank, suggestions, alerts, backups and updates pages work again. The
+# console's sign-in lasts eight hours; the domain, you and account steps change
+# only here.
 
 set -euo pipefail
 shopt -s inherit_errexit
@@ -835,7 +841,7 @@ case "${1:-}" in
     step_web
     ;;
   *)
-    sed -n '3,49s/^# \{0,1\}//p' "${BASH_SOURCE[0]}" >&2
+    sed -n '3,55s/^# \{0,1\}//p' "${BASH_SOURCE[0]}" >&2
     exit 2
     ;;
 esac

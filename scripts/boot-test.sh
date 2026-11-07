@@ -63,7 +63,12 @@
 #      calls Firefly III on the internal network. Then the console, setup
 #      finished, signs you in with Firefly III, as a browser does: its own login
 #      page with the account's password, its approval page, and back to the
-#      console, which shows the server to its owner
+#      console, which shows the server to its owner. Signed in, the owner makes a
+#      new bank key from the browser: a new certificate, uploaded to Enable
+#      Banking's stand-in, and the application ID kept with it. Sign out leaves
+#      Firefly III taking none of the console's tokens. After setup, a request
+#      with no token, the old code, another app's token or a malformed one is
+#      refused; and console expire revokes a sign-in made nine hours old
 #  10. the legal pages through Caddy: on their host, and under /legal/ on
 #      Firefly Pocket's; and a bank consent's callback reaching the importer
 #      fork on Firefly Pocket's host and on the importer's
@@ -311,7 +316,7 @@ jq -n --arg cert "$jar/application.crt" --arg app_id "$app_id" --arg anthropic "
 cat > "$jar/outside/outside.py" <<'STUB'
 # Stand-ins for the services setup talks to, on one port, as far as the server
 # can tell them apart: Enable Banking's GET /application (a token signed with
-# the key of the certificate the console handed out, for this application ID),
+# the key of the certificate the console handed out last, for this application ID),
 # Anthropic's GET /v1/models/<model> (this key), healthchecks.io's
 # POST /api/v3/checks/ (this API key) and its pings, and an ntfy topic under
 # /ntfy/. Everything sent to it is listed at GET /log, for the test to read.
@@ -320,10 +325,6 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 
 config = json.load(open(sys.argv[1]))
 port_file = sys.argv[2]
-pub = tempfile.NamedTemporaryFile(suffix=".pem", delete=False)
-pub.write(subprocess.run(["openssl", "x509", "-in", config["cert"], "-noout", "-pubkey"],
-                         check=True, capture_output=True).stdout)
-pub.close()
 log = []
 
 
@@ -332,10 +333,14 @@ def unb64(part):
 
 
 def signed(token):
+    """Read the certificate again each time: a new key's is uploaded over it."""
     try:
         header, payload, signature = token.split(".")
         head, claims = json.loads(unb64(header)), json.loads(unb64(payload))
-        with tempfile.NamedTemporaryFile() as sig:
+        with tempfile.NamedTemporaryFile(suffix=".pem") as pub, tempfile.NamedTemporaryFile() as sig:
+            pub.write(subprocess.run(["openssl", "x509", "-in", config["cert"], "-noout", "-pubkey"],
+                                     check=True, capture_output=True).stdout)
+            pub.flush()
             sig.write(unb64(signature))
             sig.flush()
             verified = subprocess.run(["openssl", "dgst", "-sha256", "-verify", pub.name, "-signature", sig.name],
@@ -630,9 +635,10 @@ echo "==> after setup, the console signs its owner in with Firefly III"
 # this machine, Caddy's own CA is not checked, and redirects are followed by
 # hand. The password comes on stdin.
 cat > "$jar/browser.py" <<'BROWSER'
-import html, http.cookiejar, re, socket, ssl, sys, urllib.parse, urllib.request
+import html, http.cookiejar, re, socket, ssl, subprocess, sys, urllib.parse, urllib.request
 
 admin, firefly, email = sys.argv[1:4]
+rotate = sys.argv[4:5] == ["rotate"]
 password = sys.stdin.readline().rstrip("\n")
 resolve = socket.getaddrinfo
 socket.getaddrinfo = lambda host, *a, **k: resolve("127.0.0.1" if host.endswith(".localhost") else host, *a, **k)
@@ -680,13 +686,116 @@ if url.startswith(f"https://{firefly}/oauth/authorize"):
     status, page, url = go(f"https://{firefly}/oauth/authorize", form)
 print(status, url)
 print("SIGNED IN AS " + email if f"Signed in with Firefly III as {email}" in page else page[-1500:])
+if not rotate:
+    sys.exit(0)
+
+
+# rotate <application ID> <certificate file>: as the owner would, still signed
+# in, make a new bank key, upload its certificate (to the file Enable Banking's
+# stand-in reads), give the application ID again, then sign out. The server
+# applies each request as its systemd unit would.
+def post(path, form):
+    """A form sent from the console's own page: the status, and where it sends the browser."""
+    request = urllib.request.Request(f"https://{admin}{path}", data=urllib.parse.urlencode(form).encode(),
+                                     headers={"Origin": f"https://{admin}"})
+    try:
+        r = opener.open(request)
+        status, headers = r.status, r.headers
+        r.read()
+    except urllib.error.HTTPError as e:
+        status, headers = e.code, e.headers
+        e.read()
+    return status, urllib.parse.urljoin(f"https://{admin}{path}", headers.get("Location") or "")
+
+
+def handed_over(path, form, label):
+    status, url = post(path, form)
+    found = re.fullmatch(rf"https://{re.escape(admin)}/requests/([0-9a-f]{{32}})", url)
+    if status != 303 or not found:
+        sys.exit(f"{path} after setup got {status} {url}, not a request")
+    print(label, found.group(1))
+    subprocess.run(["scripts/firefly-pocket", "console", "apply"], check=True, stdout=sys.stderr)
+    return go(url)
+
+
+app_id, certificate = sys.argv[5:7]
+status, page, url = handed_over("/bank/key", {}, "KEY")
+if url != f"https://{admin}/bank":
+    sys.exit(f"the new key should lead back to the bank page, but got {status} {url}")
+with opener.open(f"https://{admin}/bank/certificate") as r, open(certificate, "wb") as f:
+    f.write(r.read())
+status, page, url = handed_over("/bank", {"app_id": app_id}, "BANK")
+if "Firefly Pocket CI" not in page:
+    sys.exit(f"the console does not say the ID was kept: {status} {url} {page[-800:]}")
+status, url = post("/logout", {})
+print("SIGNED OUT", status, url)
+subprocess.run(["scripts/firefly-pocket", "console", "apply"], check=True, stdout=sys.stderr)
+status, url = post("/bank/key", {})
+print("AFTER SIGN OUT", status, url)
 BROWSER
-said="$(python3 "$jar/browser.py" "$ADMIN_HOSTNAME" "$FIREFLY_HOSTNAME" ci@example.com <<<"$password")" \
-  || fail "the sign-in stopped: $said"
+cp "$jar/application.crt" "$jar/application.old.crt"
+said="$(python3 "$jar/browser.py" "$ADMIN_HOSTNAME" "$FIREFLY_HOSTNAME" ci@example.com \
+  rotate "$app_id" "$jar/application.crt" <<<"$password")" || fail "the sign-in stopped: $said"
 printf '%s\n' "$said"
 grep -qx 'SIGNED IN AS ci@example.com' <<<"$said" || fail "the console did not sign its owner in"
 grep -q '/oauth/callback' <<<"$said" || fail "the sign-in did not come back through the console's callback"
 echo "the console signs its owner in with Firefly III, with no secret of its own"
+
+echo "==> signed in, the owner makes a new bank key from the browser, then signs out"
+message() { jq -r --arg id "$1" '.requests[$id].message' compose/console/status/status.json; }
+client="$(scripts/firefly-pocket config get CONSOLE_CLIENT_ID)"
+# The console's tokens Firefly III still takes.
+console_tokens_live() {
+  compose exec -T -e PGPASSWORD="$POSTGRES_SUPER_PASSWORD" db psql -U postgres -d firefly -v ON_ERROR_STOP=1 -tAc \
+    "SELECT count(*) FROM oauth_access_tokens WHERE client_id::text = '$client' AND NOT revoked" | tr -d '[:space:]'
+}
+for label in KEY BANK; do
+  id="$(sed -n "s/^$label //p" <<<"$said")"
+  [ "$(state "$id")" = applied ] || fail "the $label request after setup: $(state "$id"): $(message "$id")"
+done
+cmp -s "$jar/application.old.crt" "$jar/application.crt" && fail "the bank page hands out the old certificate"
+# shellcheck source=lib.sh
+source "$REPO_ROOT/scripts/lib.sh"
+[ "$(openssl x509 -in "$jar/application.crt" -noout -pubkey)" = "$(eb_pem "$ENABLE_BANKING_PRIVATE_KEY" | openssl pkey -pubout)" ] \
+  || fail "the new certificate is not that of the server's new key"
+[ "$(scripts/firefly-pocket config get ENABLE_BANKING_APP_ID)" = "$app_id" ] || fail "the application's ID was not kept with the new key"
+given="$(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$(compose ps -q importer)" | grep '^ENABLE_BANKING_APP_ID=' || true)"
+[ "$given" = "ENABLE_BANKING_APP_ID=$app_id" ] || fail "the importer did not start again with the ID: it has \"$given\""
+grep -q '^SIGNED OUT 303 ' <<<"$said" || fail "Sign out did not send the browser on"
+signout="$(jq -r '[.requests | to_entries[] | select(.value.action == "signout") | .value.state] | join(" ")' compose/console/status/status.json)"
+[ "$signout" = applied ] || fail "the sign-out request: \"$signout\", not applied"
+[ "$(console_tokens_live)" = 0 ] || fail "Firefly III still takes $(console_tokens_live) of the console's tokens after Sign out"
+grep -q "^AFTER SIGN OUT .*/requests/" <<<"$said" && fail "the console took a request after Sign out"
+echo "a new key and its certificate, the ID kept with it, and Sign out ends the token"
+
+echo "==> after setup, a request needs the owner's sign-in, from the console"
+key="$ENABLE_BANKING_PRIVATE_KEY"
+printf '{"action":"bank_key"}' > "$inbox/$(fake_id 4).json"
+printf '{"action":"bank_key","code":"%s"}' "$code" > "$inbox/$(fake_id 5).json"
+printf '{"action":"bank_key","token":"%s"}' "$IMPORTER_FIREFLY_TOKEN" > "$inbox/$(fake_id 6).json"
+printf '{"action":"bank_key","token":"not-a-token"}' > "$inbox/$(fake_id 7).json"
+scripts/firefly-pocket console apply
+for forged in 4 5 6 7; do
+  [ "$(state "$(fake_id $forged)")" = refused ] || fail "the request $(fake_id $forged): $(state "$(fake_id $forged)"), not refused"
+done
+[[ "$(message "$(fake_id 6)")" == *"another app's token"* ]] || fail "the importer's token was refused for another reason: $(message "$(fake_id 6)")"
+# shellcheck source=lib.sh
+source "$REPO_ROOT/scripts/lib.sh"
+[ "$ENABLE_BANKING_PRIVATE_KEY" = "$key" ] || fail "a refused request changed the bank key"
+echo "no token, the old setup code, another app's token and a malformed one are refused"
+
+echo "==> the console's sign-ins end after eight hours"
+said="$(python3 "$jar/browser.py" "$ADMIN_HOSTNAME" "$FIREFLY_HOSTNAME" ci@example.com <<<"$password")" \
+  || fail "the second sign-in stopped: $said"
+grep -qx 'SIGNED IN AS ci@example.com' <<<"$said" || fail "the console did not sign its owner in again: $said"
+[ "$(console_tokens_live)" -ge 1 ] || fail "the sign-in left no token Firefly III takes"
+compose exec -T -e PGPASSWORD="$POSTGRES_SUPER_PASSWORD" db psql -U postgres -d firefly -v ON_ERROR_STOP=1 -qc \
+  "UPDATE oauth_access_tokens SET created_at = created_at - interval '9 hours' WHERE client_id::text = '$client'"
+expired="$(scripts/firefly-pocket console expire)"
+printf '%s\n' "$expired"
+grep -Eq ' [1-9][0-9]* revoked$' <<<"$expired" || fail "console expire revoked nothing: $expired"
+[ "$(console_tokens_live)" = 0 ] || fail "Firefly III still takes a console token nine hours old"
+echo "console expire revokes the console's tokens older than eight hours"
 
 # By name through Caddy, as a browser asks: its own CA for *.localhost (-k),
 # from this network. The legal pages render on their host and under /legal/
