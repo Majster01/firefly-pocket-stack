@@ -53,3 +53,8 @@ LOCK="flock -w 7200 /run/lock/fireflyx.lock"
 # until offsite backups are configured (the nightly backup alerts about that).
 # Done before the 05:30 window in which unattended-upgrades may reboot.
 30 4 * * 0 $LOCK /opt/fireflyx/scripts/restore-test.sh --from-restic >> /var/log/fireflyx/restore-test.log 2>&1
+
+# Every hour — the console's Firefly III tokens revoked once they are eight hours
+# old, as old as its sign-in lasts (scripts/console.sh expire). Nothing to do
+# while no one signs in to it.
+17 * * * * flock -w 600 /run/lock/fireflyx.lock /opt/fireflyx/scripts/console.sh expire >> /var/log/fireflyx/console.log 2>&1

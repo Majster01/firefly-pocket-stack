@@ -364,13 +364,14 @@ class NameCheck:
 
 
 # ------------------------------------------------------------- requests ---
-def write_request(inbox: Path, action: str, code: str, fields: dict) -> str:
+def write_request(inbox: Path, action: str, auth: dict[str, str], fields: dict) -> str:
     """Hand a request to the host agent: written beside, then renamed into
-    place, so the agent never reads half of one (it takes *.json only). The
-    setup code goes with it, for the agent to check."""
+    place, so the agent never reads half of one (it takes *.json only). What
+    lets it in goes with it, for the agent to check: {"code": the setup code}
+    during setup, {"token": Firefly III's} after."""
     rid = secrets.token_hex(16)
     data = json.dumps(
-        {"version": 1, "id": rid, "action": action, "code": code, **fields, "at": now_iso()}
+        {"version": 1, "id": rid, "action": action, **auth, **fields, "at": now_iso()}
     ).encode()
     tmp = inbox / f".{rid}.tmp"
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
@@ -602,7 +603,13 @@ class Console:
     def logout(self, req: Request) -> Response:
         with self.lock:
             self.sessions.pop(req.cookie(COOKIE), None)
-            self.owner_sessions.pop(req.cookie(COOKIE), None)
+            token = self.owner_sessions.pop(req.cookie(COOKIE), None)
+        if token:
+            # Firefly III revokes it: no one gets far with it from here on.
+            try:
+                write_request(self.inbox, "signout", {"token": token}, {})
+            except OSError:
+                pass  # it lasts eight hours at most: the agent revokes it then
         return redirect("/", [("Set-Cookie", f"{COOKIE}=; Path=/; Secure; HttpOnly; SameSite=Strict; Max-Age=0")])
 
     def login_page(self, status: int = 200, error: str = "") -> Response:
@@ -757,7 +764,7 @@ class Console:
         moves_to = str(settings.get("ADMIN_HOSTNAME") or "") or f"admin.{values['DOMAIN']}"
         here = req.headers.get("host", "").split(":")[0]
         try:
-            rid = write_request(self.inbox, "server", self.code, {"settings": values})
+            rid = write_request(self.inbox, "server", {"code": self.code}, {"settings": values})
         except OSError:
             return self.server_page(req, 503, values, note=NO_INBOX)
         with self.lock:
@@ -990,9 +997,12 @@ class Console:
                         [("Content-Disposition", 'attachment; filename="firefly-pocket-enable-banking.crt"')])
 
     def hand_over(self, req: Request, action: str, fields: dict, page) -> Response:
-        """A request to the agent, then its page; on no inbox, the form again."""
+        """A request to the agent, then its page; on no inbox, the form again.
+        After setup it carries the owner's Firefly III token, not the code."""
+        with self.lock:
+            token = self.owner_sessions.get(req.cookie(COOKIE), "")
         try:
-            rid = write_request(self.inbox, action, self.code, fields)
+            rid = write_request(self.inbox, action, {"token": token} if token else {"code": self.code}, fields)
         except OSError:
             return page(req, 503, note=NO_INBOX)
         with self.lock:
@@ -1350,13 +1360,14 @@ class Console:
             return self.needs_account(UPDATES, "Updates", status)
         kept = part(state, "updates")
         origin = str(kept.get("origin") or "")
+        finish, finish_name = ("/", "Your server") if state.get("setup_done") is True else ("/finish", "Finish")
         repository = f"<code>{esc(origin)}</code>" if origin else "the repository this server was installed from"
         if kept.get("agent") is True:
             now = f"""
     <p class="good">The deploy agent is on: this server follows master of {repository}.</p>
     <p class="quiet">To turn it off, on the server: <code>sudo systemctl disable --now fireflyx-deploy.timer</code>. Then
     nothing runs on a schedule.</p>"""
-            after = '<p><a class="button" href="/finish">Next: Finish</a></p>'
+            after = f'<p><a class="button" href="{finish}">Next: {finish_name}</a></p>'
         else:
             now = """
     <p><span class="bad">Off:</span> nothing runs on a schedule, so no nightly import and no backup.</p>
@@ -1364,7 +1375,7 @@ class Console:
     <p class="quiet">Its timer is a systemd unit, so the server's user needs sudo without a password, as a server made
     from <code>terraform/cloud-init.yaml</code> has. Without it, on the server: <code>scripts/firefly-pocket setup
     updates</code>, which asks for the password.</p>"""
-            after = """<p><a href="/finish">Skip it for now</a>: on the server, <code>scripts/firefly-pocket setup updates</code>
+            after = f"""<p><a href="{finish}">Skip it for now</a>: on the server, <code>scripts/firefly-pocket setup updates</code>
     does it later.</p>"""
         body = f"""
 <div class="setup">
@@ -1412,7 +1423,7 @@ class Console:
   <section class="panel">
     <h1>Finish</h1>
     {note}
-    {summary(state, links=True)}
+    {summary(state)}
     <p class="quiet">Each step was applied as you saved it. To change one, open its page; after Finish, on the server:
     <code>scripts/firefly-pocket setup &lt;step&gt;</code>.</p>
     <h2>Finish setup</h2>
@@ -1437,17 +1448,21 @@ class Console:
             action = str(result.get("action") or action)
         done, not_done, working = OUTCOME.get(action, OUTCOME["server"])
         back = BACK.get(action, "/server")
+        after = state.get("setup_done") is True
+        back_label = "Back" if after else "Back to setup"
         if isinstance(result, dict) and result.get("state") in ("applied", "refused", "failed"):
             message = esc(result.get("message") or "")
             if result.get("state") != "applied":
                 return self.page(200, not_done, f'<section class="narrow"><h1>{not_done}</h1><p class="error">{message}</p>'
-                                 f'<p><a class="button" href="{back}">Back to setup</a></p></section>', signed_in=True)
+                                 f'<p><a class="button" href="{back}">{back_label}</a></p></section>', signed_in=True)
             if action == "bank_key":  # nothing to read: the bank page shows the certificate
                 return redirect("/bank")
             if action == "backups":  # a new repository's password is not shown again
                 self.new_repository_password(state)
-            links = f'<a class="button" href="{back}">Back to setup</a>'
-            if action in NEXT:
+            links = f'<a class="button" href="{back}">{back_label}</a>'
+            if after:
+                links = f'<a class="button" href="/">Your server</a> <a href="{back}">Back</a>'
+            elif action in NEXT:
                 path, name = NEXT[action]
                 links = f'<a class="button" href="{path}">Next: {esc(name)}</a> <a href="{back}">Back</a>'
             elif action == "finish":
@@ -1462,7 +1477,7 @@ class Console:
                 body = f"""<section class="narrow"><h1>{not_done}</h1>
   <p>The server stopped working on it, after: {esc(result.get("message") or "")}</p>
   <p class="error">On the server, <code>journalctl -u firefly-pocket-console</code> says why.</p>
-  <p><a class="button" href="{back}">Back to setup</a></p></section>"""
+  <p><a class="button" href="{back}">{back_label}</a></p></section>"""
                 return self.page(200, not_done, body, signed_in=True)
             body = f"""<section class="narrow"><h1>{working}</h1>
   <p>{esc(result.get("message") or "")}</p>
@@ -1503,9 +1518,30 @@ class Console:
             return self.logout(req)
         if not self.owner_signed_in(req):
             return self.finished(state)
-        if path != "/":
-            return redirect("/")
-        return self.overview(state)
+        post = req.method == "POST"
+        if path == "/":
+            return self.overview(state)
+        if path == "/bank":
+            return self.save_bank(req) if post else self.bank_page(req)
+        if path == "/bank/key" and post:
+            return self.make_key(req)
+        if path == "/bank/certificate" and not post:
+            return self.certificate()
+        if path == "/suggestions":
+            return self.save_suggestions(req) if post else self.suggestions_page(req)
+        if path == "/alerts" and not post:
+            return self.alerts_page(req)
+        if path in ("/alerts/ntfy", "/alerts/test", "/alerts/healthchecks") and post:
+            return self.save_alerts(req, path.rsplit("/", 1)[1])
+        if path == "/backups":
+            return self.save_backups(req) if post else self.backups_page(req)
+        if path == "/updates":
+            return self.save_updates(req) if post else self.updates_page(req)
+        match = re.fullmatch(r"/requests/([0-9a-f]{32})", path)
+        if match and not post:
+            return self.request_page(req, match.group(1))
+        # The Server step, the account and Finish are done: the overview.
+        return redirect("/")
 
     def owner_signed_in(self, req: Request) -> bool:
         token = req.cookie(COOKIE)
@@ -1583,9 +1619,12 @@ class Console:
         body = f"""<section class="narrow">
   <h1>Your server</h1>
   <p>Signed in with Firefly III as {esc(owner)}.</p>
-  {summary(state, links=False)}
-  <p class="quiet">Changing a step here comes next. Until then, on the server:
-  <code>scripts/firefly-pocket setup &lt;step&gt;</code>, one of bank, suggestions, alerts, backups, updates.</p>
+  {summary(state)}
+  <p class="quiet">Open a step to change it: the server checks each change with Firefly III, as you, before it applies
+  it. The domain and your details change on the server: <code>scripts/firefly-pocket setup domain</code>, or
+  <code>setup you</code>.</p>
+  <p class="quiet">This sign-in lasts eight hours; then Firefly III takes the console's token no more. Sign out when
+  you are done.</p>
 </section>"""
         return self.page(200, "Your server", body, signed_in=True)
 
@@ -1602,7 +1641,7 @@ class Console:
             problem = f'<p class="error">The server\'s last step did not finish: {esc(last.get("message") or "")}</p>'
         if part(state, "signin").get("client_id"):
             signin = """<h2>This console</h2>
-  <p>It shows what the server has, to you only: <a class="button" href="/signin">Sign in with Firefly III</a></p>
+  <p>It shows what the server has, and changes it, for you only: <a class="button" href="/signin">Sign in with Firefly III</a></p>
   <p class="quiet">Firefly III asks for your password, and its two-factor code once you have turned that on. The
   first time it also asks whether to let the console in.</p>"""
         else:
@@ -1619,8 +1658,8 @@ class Console:
   Tokens, Create one named after the phone.</p>
   {signin}
   <h2>Changing a step</h2>
-  <p>On the server, <code>scripts/firefly-pocket setup &lt;step&gt;</code> sets up or changes one step: bank,
-  suggestions, alerts, backups, updates.</p>
+  <p>Signed in here, open the step: bank, suggestions, alerts, backups, updates. Or on the server,
+  <code>scripts/firefly-pocket setup &lt;step&gt;</code>.</p>
 </section>"""
         return self.page(status, "Setup is finished", body)
 
@@ -1649,9 +1688,9 @@ class Console:
         return Response(status, doc.encode("utf-8"))
 
 
-def summary(state: dict, links: bool) -> str:
-    """What each step left, one row each: Finish's, with a link to each page,
-    and the signed-in page's after setup, without."""
+def summary(state: dict) -> str:
+    """What each step left, one row each, with a link to each page that can
+    change it: Finish's, and the signed-in overview's after setup."""
     settings = part(state, "settings")
     hosts = hosts_of(state)
     app_id = str(part(state, "bank").get("app_id") or "")
@@ -1686,7 +1725,8 @@ def summary(state: dict, links: bool) -> str:
             ("Alerts", "/alerts", alerts_html), ("Backups", "/backups", backups_html), ("Updates", "/updates", updates_html))
     body = ""
     for name, path, value in rows:
-        head = f'<a href="{path}">{name}</a>' if links else name
+        changes = path not in ("/server", "/account") or state.get("setup_done") is not True
+        head = f'<a href="{path}">{name}</a>' if changes else name
         body += f'<tr><th scope="row">{head}</th><td>{value}</td></tr>'
     return f'<table class="settings"><tbody>{body}</tbody></table>'
 
@@ -1737,6 +1777,16 @@ def new_password() -> str:
 def stepper(current: int, state: dict) -> str:
     done = steps_done(state)
     items = ""
+    if state.get("setup_done") is True:
+        # After setup: the steps that change from here, and the overview.
+        items = '<li class="done"><a href="/">Your server</a></li>'
+        for i, (name, path) in enumerate(STEPS):
+            if BANK <= i <= UPDATES:
+                kind = "now" if i == current else ("done" if i in done else "later")
+                aria = ' aria-current="page"' if i == current else ""
+                label = f'<a href="{path}">{esc(name)}</a>' if i != current else esc(name)
+                items += f'<li class="{kind}"{aria}>{label}</li>'
+        return f'<nav class="steps" aria-label="Your server"><ol>{items}</ol></nav>'
     for i, (name, path) in enumerate(STEPS):
         kind = "now" if i == current else ("done" if i in done else "later")
         aria = ' aria-current="step"' if i == current else ""
