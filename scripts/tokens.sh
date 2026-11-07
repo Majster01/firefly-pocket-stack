@@ -26,11 +26,14 @@ compose() { docker compose --project-directory "$COMPOSE_DIR" "$@"; }
 
 # token_days_left <token>: whole days until it expires, from its exp claim (a
 # negative number once it has). Fails when the token has no readable exp.
+# Firefly III's tokens carry it with microseconds (1825934400.123456), as
+# lcobucci/jwt writes it, so the seconds are what count.
 token_days_left() {
   local exp
   exp="$(jq -Rr 'split(".")[1] // "" | gsub("-"; "+") | gsub("_"; "/")
       | (if length % 4 == 0 then . else . + ("=" * (4 - length % 4)) end)
-      | @base64d | fromjson | .exp // empty' <<<"$1" 2>/dev/null)" || return 1
+      | @base64d | fromjson | .exp // empty
+      | if type == "string" then tonumber else . end | numbers | floor' <<<"$1" 2>/dev/null)" || return 1
   [[ "$exp" =~ ^[0-9]+$ ]] || return 1
   echo $(((exp - $(date +%s)) / 86400))
 }
