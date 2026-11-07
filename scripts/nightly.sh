@@ -29,6 +29,15 @@ importer_artisan() {
   return "${PIPESTATUS[0]}"
 }
 
+# --- 0. The apps' Firefly III tokens --------------------------------------
+# Firefly III gives each a year. A token with 30 days or less left, or one
+# Firefly III no longer takes, is made again and its app started again with it
+# (scripts/tokens.sh, Setup UI step 10), before the import below needs it. A
+# failure alerts; the old tokens still work until they expire, so the rest runs.
+run_step "app token rotation" \
+  "$REPO_ROOT/scripts/tokens.sh" rotate \
+  || FAILURES=$((FAILURES + 1))
+
 # --- 1. Consent check ------------------------------------------------------
 # Asks Enable Banking for every connection's consent status and expiry. Fails
 # (and so alerts) when a consent has ended, or on the days it is 14, 7 and 3
