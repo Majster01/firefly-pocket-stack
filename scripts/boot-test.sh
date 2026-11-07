@@ -65,13 +65,18 @@
 #      page with the account's password, its approval page, and back to the
 #      console, which shows the server to its owner. Signed in, the owner makes a
 #      new bank key from the browser: a new certificate, uploaded to Enable
-#      Banking's stand-in, and the application ID kept with it. Sign out leaves
-#      Firefly III taking none of the console's tokens. After setup, a request
-#      with no token, the old code, another app's token or a malformed one is
-#      refused; and console expire revokes a sign-in made nine hours old
+#      Banking's stand-in, and the application ID kept with it; and opens the
+#      importer's own pages under /importer/ on the console's host. Sign out
+#      leaves Firefly III taking none of the console's tokens, and the importer's
+#      pages shut. After setup, a request with no token, the old code, another
+#      app's token or a malformed one is refused; and console expire revokes a
+#      sign-in made nine hours old
 #  10. the legal pages through Caddy: on their host, and under /legal/ on
 #      Firefly Pocket's; and a bank consent's callback reaching the importer
-#      fork on Firefly Pocket's host and on the importer's
+#      fork on Firefly Pocket's host and on the importer's. With no sign-in, the
+#      importer's pages on the console's host send the browser to the console,
+#      the fork's API is not there, and a callback of the importer's own flow on
+#      Firefly Pocket's host goes on to them
 
 set -euo pipefail
 
@@ -635,7 +640,7 @@ echo "==> after setup, the console signs its owner in with Firefly III"
 # this machine, Caddy's own CA is not checked, and redirects are followed by
 # hand. The password comes on stdin.
 cat > "$jar/browser.py" <<'BROWSER'
-import html, http.cookiejar, re, socket, ssl, subprocess, sys, urllib.parse, urllib.request
+import html, http.cookiejar, re, socket, ssl, subprocess, sys, time, urllib.parse, urllib.request
 
 admin, firefly, email = sys.argv[1:4]
 rotate = sys.argv[4:5] == ["rotate"]
@@ -727,8 +732,32 @@ with opener.open(f"https://{admin}/bank/certificate") as r, open(certificate, "w
 status, page, url = handed_over("/bank", {"app_id": app_id}, "BANK")
 if "Firefly Pocket CI" not in page:
     sys.exit(f"the console does not say the ID was kept: {status} {url} {page[-800:]}")
+# The ID just kept starts the importer again: Caddy cannot reach it (502)
+# until it listens.
+for _ in range(60):
+    status, page, url = go(f"https://{admin}/importer/")
+    if status not in (502, 503, 504):
+        break
+    time.sleep(2)
+print("IMPORTER", status, url)
+if status != 200 or not url.startswith(f"https://{admin}/importer/") or f'href="https://{admin}/importer/' not in page:
+    sys.exit(f"the importer's pages are not under https://{admin}/importer/ for the signed-in owner: {status} {url} {page[:600]}")
+
+
+def peek(path):
+    """Where a GET sends the browser, without following it."""
+    try:
+        r = opener.open(f"https://{admin}{path}")
+        r.read()
+        return r.status, ""
+    except urllib.error.HTTPError as e:
+        e.read()
+        return e.code, e.headers.get("Location") or ""
+
+
 status, url = post("/logout", {})
 print("SIGNED OUT", status, url)
+print("IMPORTER AFTER SIGN OUT", *peek("/importer/"))
 subprocess.run(["scripts/firefly-pocket", "console", "apply"], check=True, stdout=sys.stderr)
 status, url = post("/bank/key", {})
 print("AFTER SIGN OUT", status, url)
@@ -766,6 +795,8 @@ signout="$(jq -r '[.requests | to_entries[] | select(.value.action == "signout")
 [ "$signout" = applied ] || fail "the sign-out request: \"$signout\", not applied"
 [ "$(console_tokens_live)" = 0 ] || fail "Firefly III still takes $(console_tokens_live) of the console's tokens after Sign out"
 grep -q "^AFTER SIGN OUT .*/requests/" <<<"$said" && fail "the console took a request after Sign out"
+grep -qx 'IMPORTER 200 https://'"$ADMIN_HOSTNAME"'/importer/.*' <<<"$said" || fail "the owner did not reach the importer's pages"
+grep -qx 'IMPORTER AFTER SIGN OUT 303 /' <<<"$said" || fail "the importer's pages let a signed-out browser in: $(grep '^IMPORTER AFTER' <<<"$said")"
 echo "a new key and its certificate, the ID kept with it, and Sign out ends the token"
 
 echo "==> after setup, a request needs the owner's sign-in, from the console"
@@ -833,5 +864,29 @@ for host in "$NEXT_HOSTNAME" "$IMPORT_HOSTNAME"; do
   fi
 done
 echo "the fork answered the callback on both hosts"
+
+# The importer's own pages are on the console's host, behind its sign-in
+# (Hostnames and routing step 7): with no session, the browser goes to the
+# console, and the fork's API for Firefly Pocket is not there at all. A
+# callback of the importer's own flow (a UUID state) arriving on Firefly
+# Pocket's host goes on to those pages, with its query.
+echo "==> the importer's pages on the console's host, behind its sign-in"
+went_to() {
+  docker run --rm --network "$DOCKER_NETWORK" "$CURL_IMAGE" -sS -k --max-time 30 \
+    --connect-to ::caddy:443 -o /dev/null -w '%{http_code} %{redirect_url}' "$1"
+}
+went="$(went_to "https://$ADMIN_HOSTNAME/importer/")"
+[ "$went" = "303 https://$ADMIN_HOSTNAME/" ] || fail "the importer's pages answered \"$went\" with no sign-in, not the console"
+went="$(went_to "https://$ADMIN_HOSTNAME/importer")"
+[ "$went" = "308 https://$ADMIN_HOSTNAME/importer/" ] || fail "/importer answered \"$went\""
+for path in /importer/api/fireflyx/connections /importer/fireflyx/eb-callback; do
+  went="$(went_to "https://$ADMIN_HOSTNAME$path")"
+  [ "$went" = "404 " ] || fail "the fork's API answered \"$went\" at $path on the console's host"
+done
+uuid_state=0b6e2c1a-4f3d-4c2b-9a8e-7d6c5b4a3f21
+went="$(went_to "https://$NEXT_HOSTNAME/eb-callback?state=$uuid_state&code=boot-test")"
+[ "$went" = "302 https://$ADMIN_HOSTNAME/importer/eb-callback?state=$uuid_state&code=boot-test" ] \
+  || fail "the importer's own callback on Firefly Pocket's host answered \"$went\""
+echo "no sign-in, no importer; its API is not there; its own callbacks go on to it"
 
 echo "==> booted and checked"

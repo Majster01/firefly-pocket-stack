@@ -43,6 +43,9 @@ It is built so that taking it over gains little:
   the client is public, and PKCE stands in for one. Firefly III's token stays
   in memory for the session, which lasts 8 hours, and in no file.
 - It shares a network with Caddy only, not with the apps or Postgres.
+- It is also the importer's lock: Caddy asks /auth/importer before it lets a
+  request through to the importer's own pages under /importer/ (Hostnames and
+  routing step 7), and only this console's sign-in passes.
 
 Standard library only: compose runs it on the stock python image, with this
 directory mounted read-only, as an unprivileged user on a read-only root.
@@ -522,6 +525,8 @@ class Console:
             return Response(200, b"ok\n", "text/plain; charset=utf-8")
         if path == "/console.css":
             return Response(200, self.css, "text/css; charset=utf-8", [("Cache-Control", "max-age=300")])
+        if path == "/auth/importer" and req.method in ("GET", "HEAD"):
+            return self.importer_auth(req)
         if req.method not in ("GET", "HEAD", "POST"):
             return Response(405, b"", headers=[("Allow", "GET, HEAD, POST")])
         if req.method == "POST" and not same_origin(req):
@@ -597,7 +602,7 @@ class Console:
         with self.lock:
             self.sessions = {t: until for t, until in self.sessions.items() if until > now}
             self.sessions[token] = now + SESSION_SECONDS
-        cookie = f"{COOKIE}={token}; Path=/; Secure; HttpOnly; SameSite=Strict; Max-Age={SESSION_SECONDS}"
+        cookie = f"{COOKIE}={token}; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age={SESSION_SECONDS}"
         return redirect(next_step(read_status(self.status_file)), [("Set-Cookie", cookie)])
 
     def logout(self, req: Request) -> Response:
@@ -610,7 +615,7 @@ class Console:
                 write_request(self.inbox, "signout", {"token": token}, {})
             except OSError:
                 pass  # it lasts eight hours at most: the agent revokes it then
-        return redirect("/", [("Set-Cookie", f"{COOKIE}=; Path=/; Secure; HttpOnly; SameSite=Strict; Max-Age=0")])
+        return redirect("/", [("Set-Cookie", f"{COOKIE}=; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=0")])
 
     def login_page(self, status: int = 200, error: str = "") -> Response:
         body = f"""
@@ -1543,6 +1548,20 @@ class Console:
         # The Server step, the account and Finish are done: the overview.
         return redirect("/")
 
+    def importer_auth(self, req: Request) -> Response:
+        """Caddy's forward_auth for the importer's own pages, under /importer/ on
+        this host (Hostnames and routing step 7): 204 lets the request through,
+        anything else is what the browser gets instead. The same sign-in as the
+        console's: the setup code during setup, Firefly III's owner after it."""
+        state = read_status(self.status_file)
+        if not self.code or (state.get("setup_done") is True and "account" in state):
+            allowed = self.owner_signed_in(req)
+        else:
+            allowed = self.signed_in(req)
+        if allowed:
+            return Response(204, b"", "text/plain; charset=utf-8", [("Cache-Control", "no-store")])
+        return redirect("/", [("Cache-Control", "no-store")])
+
     def owner_signed_in(self, req: Request) -> bool:
         token = req.cookie(COOKIE)
         with self.lock:
@@ -1604,7 +1623,7 @@ class Console:
             self.owner_sessions = {t: a for t, a in self.owner_sessions.items() if t in self.sessions}
             self.sessions[session] = now + SESSION_SECONDS
             self.owner_sessions[session] = access
-        cookie = f"{COOKIE}={session}; Path=/; Secure; HttpOnly; SameSite=Strict; Max-Age={SESSION_SECONDS}"
+        cookie = f"{COOKIE}={session}; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age={SESSION_SECONDS}"
         return redirect("/", clear + [("Set-Cookie", cookie)])
 
     def not_signed_in(self, status: int, why: str, headers: list[tuple[str, str]]) -> Response:
@@ -1623,6 +1642,8 @@ class Console:
   <p class="quiet">Open a step to change it: the server checks each change with Firefly III, as you, before it applies
   it. The domain and your details change on the server: <code>scripts/firefly-pocket setup domain</code>, or
   <code>setup you</code>.</p>
+  <p>The importer's own pages, for an import by hand or a look at its settings, are behind this sign-in too:
+  <a href="/importer/">open the importer</a>.</p>
   <p class="quiet">This sign-in lasts eight hours; then Firefly III takes the console's token no more. Sign out when
   you are done.</p>
 </section>"""
@@ -1834,8 +1855,11 @@ def redirect(location: str, headers: list[tuple[str, str]] | None = None) -> Res
 
 def same_origin(req: Request) -> bool:
     """A POST must come from a page of this console: its Origin is this host,
-    as the browser saw it through Caddy. With the cookie's SameSite=Strict, no
-    other site can make a signed-in browser save anything.
+    as the browser saw it through Caddy. With this, and the cookie's SameSite=Lax
+    (which a browser leaves off a POST from another site), no other site can make
+    a signed-in browser save anything. Lax, not Strict: a bank sends the browser
+    back to the importer behind this console (/auth/importer) from its own site,
+    and a Strict cookie stays off that whole chain of redirects.
 
     A browser sends Origin "null" where a referrer policy hides it (no-referrer
     does, even for a form on the same page): then Sec-Fetch-Site decides, which

@@ -72,8 +72,10 @@
 # Two paths here are not Pocket's, and its service worker lets both through:
 #   - /eb-callback with an "fx-" state: bank consents started from Firefly
 #     Pocket come back here, to the importer fork, as on the importer's host
-#     below (Hostnames and routing step 4). Any other state is not ours and
-#     falls through to Pocket
+#     below (Hostnames and routing step 4). A UUID state is the importer's own
+#     flow, started from its pages behind the console: the browser goes on to
+#     them, with the same query, where the importer's session cookie lives
+#     (Hostnames and routing step 7). Any other state falls through to Pocket
 #   - /legal/*: the legal site below, so this host can stand in for it
 {$NEXT_HOSTNAME} {
 	import security_headers
@@ -84,6 +86,10 @@
 		path /eb-callback
 		vars_regexp {http.request.uri.query.state} ^fx-[0-9a-f]+$
 	}
+	@importer_callback {
+		path /eb-callback
+		vars_regexp {http.request.uri.query.state} ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$
+	}
 
 	route {
 		handle @next_internal {
@@ -92,6 +98,9 @@
 		handle @fireflyx_callback {
 			rewrite * /fireflyx/eb-callback{?query}
 			reverse_proxy importer:8080
+		}
+		handle @importer_callback {
+			redir https://{$ADMIN_HOSTNAME}/importer/eb-callback{?query} 302
 		}
 		# The pages link to each other relatively, so the index needs its slash.
 		redir /legal /legal/ 308
@@ -166,9 +175,36 @@
 # the gate leaves open. It holds no secret but the setup code and changes
 # nothing itself: what it saves, the host agent checks and applies
 # (docker-compose.yml, the console service).
+#
+# Under /importer/, the importer's own pages (Hostnames and routing step 7),
+# behind the console's sign-in instead of a password of their own: Caddy asks
+# the console (/auth/importer) first, which lets through only its session, the
+# setup code's during setup and Firefly III's owner after it, and otherwise sends
+# the browser to the console. The importer builds its links under the prefix it
+# is told (X-Forwarded-Prefix, which it trusts). Its API for Firefly Pocket is
+# refused here, as on its own host.
 {$ADMIN_HOSTNAME} {
 	import security_headers
-	reverse_proxy console:8080
+
+	@importer_internal path /importer/api/fireflyx/* /importer/fireflyx/*
+
+	route {
+		redir /importer /importer/ 308
+		handle @importer_internal {
+			respond 404
+		}
+		handle_path /importer/* {
+			forward_auth console:8080 {
+				uri /auth/importer
+			}
+			reverse_proxy importer:8080 {
+				header_up X-Forwarded-Prefix /importer
+			}
+		}
+		handle {
+			reverse_proxy console:8080
+		}
+	}
 }
 
 # Intentionally absent:
