@@ -208,7 +208,7 @@ class ConsoleTest(unittest.TestCase):
         self.assertEqual(resp.status, 303)
         cookie = dict(resp.headers)["Set-Cookie"]
         self.assertTrue(cookie.startswith("__Host-console="))
-        for attribute in ("Path=/", "Secure", "HttpOnly", "SameSite=Strict"):
+        for attribute in ("Path=/", "Secure", "HttpOnly", "SameSite=Lax"):
             self.assertIn(attribute, cookie)
 
     def test_wrong_code(self):
@@ -936,7 +936,7 @@ class ConsoleTest(unittest.TestCase):
         cookies = [v for k, v in resp.headers if k == "Set-Cookie"]
         self.assertTrue(any(c.startswith("__Host-console-signin=;") for c in cookies), cookies)
         session = [c for c in cookies if c.startswith("__Host-console=")][0]
-        self.assertIn("SameSite=Strict", session)
+        self.assertIn("SameSite=Lax", session)
         self.app = app
         return session.split(";")[0]
 
@@ -1036,6 +1036,25 @@ class ConsoleTest(unittest.TestCase):
         resp = self.call("POST", "/bank/key", "", cookie=session, origin="https://evil.example")
         self.assertEqual(resp.status, 403)
         self.assertEqual(self.requests(), [])
+
+    def test_importer_is_behind_the_console_sign_in(self):
+        # During setup, the setup code's session lets Caddy through to the importer.
+        self.bank_status()
+        resp = self.call("GET", "/auth/importer", origin=None)
+        self.assertEqual((resp.status, dict(resp.headers)["Location"]), (303, "/"))
+        cookie = self.sign_in()
+        self.assertEqual(self.call("GET", "/auth/importer", cookie=cookie, origin=None).status, 204)
+        # Only GET: forward_auth asks with it.
+        self.assertNotEqual(self.call("POST", "/auth/importer", cookie=cookie).status, 204)
+        # After setup that session does no more; Firefly III's owner does, for eight hours.
+        self.finished_status()
+        resp = self.call("GET", "/auth/importer", cookie=cookie, origin=None)
+        self.assertEqual((resp.status, dict(resp.headers)["Location"]), (303, "/"))
+        session = self.signed_in_owner(FakeFirefly())
+        self.assertEqual(self.call("GET", "/auth/importer", cookie=session, origin=None).status, 204)
+        self.assertIn('href="/importer/"', self.call("GET", "/", cookie=session).body.decode())
+        self.clock.now += console.SESSION_SECONDS + 1
+        self.assertEqual(self.call("GET", "/auth/importer", cookie=session, origin=None).status, 303)
 
     def test_owner_session_ends_after_eight_hours(self):
         self.finished_status()
