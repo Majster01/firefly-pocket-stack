@@ -152,7 +152,7 @@ In Firefly Pocket: **Bank connections → Connect a bank**. Pick the country and
 
 ### Importing by hand ("Import now")
 
-On a connection's card in Firefly Pocket, **Import now** opens a time frame (default: the last 30 days) and starts an import of that connection at once. Nothing else is configurable: it uses the same settings as the nightly import (`config/importer-base.json`, the connection's session and its account mapping), with only the dates replaced. When the import finishes cleanly, the category suggester runs over **the same time frame** and the card shows what it made, with a link to review it. An import that reports errors stops there and says why; the suggester is not run.
+On a connection's card in Firefly Pocket, **Import now** opens a time frame (default: the last 30 days) and starts an import of that connection at once. Nothing else is configurable: it uses the same settings as the nightly import (`config/importer-base.json`, the connection's session and its account mapping), with only the dates replaced. Then the category suggester runs over **the same time frame**, whatever the import reported, and the card shows what it made. An import that reports errors (or cannot run at all) still shows as failed and says why, but its suggestions are made all the same: the transactions already in Firefly III for that time frame get looked at either way.
 
 It runs on the server, so you can close Firefly Pocket meanwhile. Only one manual import runs at a time, and it does not count as the night's import (the nightly report is unaffected). Overlap with what is already imported is harmless: duplicates are matched by `external_id`.
 
