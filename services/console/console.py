@@ -16,8 +16,8 @@ provider has the model for it, and the alerts: an ntfy topic, kept once a test
 alert gets through, and healthchecks.io's two checks, made with an API key the
 server does not keep. Then the offsite backup: a restic repository, made with
 a password this shows you once to keep, or one restic uses already. Then
-updates: the deploy agent, which keeps the server on master and runs the
-nightly jobs. Saved keys are write-only: this shows their last four
+updates: the deploy agent, which keeps the server on its release channel
+and runs the nightly jobs. Saved keys are write-only: this shows their last four
 characters. Finish lists what each step left, and ends the setup code.
 
 After setup (Setup UI step 8) it signs you in with Firefly III instead: an
@@ -199,16 +199,27 @@ OUTCOME = {
     "healthchecks": ("Made", "Not made", "Making the checks"),
     "backups": ("Saved", "Not saved", "Opening the repository"),
     "updates": ("Turned on", "Not turned on", "Turning on the deploy agent"),
+    "channel": ("Saved", "Not saved", "Saving the channel"),
     "finish": ("Setup is finished", "Not finished", "Finishing"),
 }
 # The page each request goes back to, and the step after it once it is done.
 BACK = {"server": "/server", "account": "/account", "bank_key": "/bank", "bank": "/bank", "suggestions": "/suggestions",
         "ntfy": "/alerts", "ntfy_test": "/alerts", "healthchecks": "/alerts", "backups": "/backups", "updates": "/updates",
-        "finish": "/finish"}
+        "channel": "/updates", "finish": "/finish"}
 NEXT = {"server": ("/account", "Firefly III account"), "account": ("/bank", "Bank connection"),
         "bank": ("/suggestions", "Suggestions"), "suggestions": ("/alerts", "Alerts"), "ntfy": ("/backups", "Backups"),
         "ntfy_test": ("/backups", "Backups"), "healthchecks": ("/backups", "Backups"), "backups": ("/updates", "Updates"),
         "updates": ("/finish", "Finish")}
+
+# A release, as scripts/channels.sh takes one for CHANNEL: X.Y.Z, no leading zeros.
+RELEASE_RE = re.compile(r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)")
+# The channels a server can follow, as the Updates page offers them.
+CHANNELS = {
+    "stable": ("Stable", "each release, between 06:00 and 08:00. A new major waits until you approve it on the "
+               "server: <code>scripts/firefly-pocket updates approve</code>"),
+    "latest": ("Latest", "every change merged into master, within two minutes. For trying what comes next"),
+    "version": ("One release", "that release and nothing after it"),
+}
 
 # As scripts/config.sh checks an API key and a model, and the providers' defaults.
 API_KEY_RE = re.compile(r"[A-Za-z0-9._-]{16,}")
@@ -574,6 +585,8 @@ class Console:
             return self.save_backups(req) if post else self.backups_page(req)
         if path == "/updates":
             return self.save_updates(req) if post else self.updates_page(req)
+        if path == "/updates/channel" and post:
+            return self.save_channel(req)
         if path == "/finish":
             return self.save_finish(req) if post else self.finish_page(req)
         match = re.fullmatch(r"/requests/([0-9a-f]{32})", path)
@@ -1335,17 +1348,22 @@ class Console:
         return self.hand_over(req, "backups", fields, self.backups_page)
 
     # ------------------------------------------------------------ updates ---
-    def updates_page(self, req: Request, status: int = 200, note: str = "") -> Response:
+    def updates_page(self, req: Request, status: int = 200, note: str = "", values=None, errors=None) -> Response:
         state = read_status(self.status_file)
         if not account_made(state):
             return self.needs_account(UPDATES, "Updates", status)
         kept = part(state, "updates")
         origin = str(kept.get("origin") or "")
+        # Not set: latest where the agent runs already (as the deploy reads it),
+        # stable where turning it on here will set that.
+        channel = str(kept.get("channel") or ("latest" if kept.get("agent") is True else "stable"))
+        version = str(kept.get("version") or "")
         finish, finish_name = ("/", "Your server") if state.get("setup_done") is True else ("/finish", "Finish")
         repository = f"<code>{esc(origin)}</code>" if origin else "the repository this server was installed from"
+        runs = f", and runs <code>{esc(version)}</code>" if version else ""
         if kept.get("agent") is True:
             now = f"""
-    <p class="good">The deploy agent is on: this server follows master of {repository}.</p>
+    <p class="good">The deploy agent is on: this server follows <code>{esc(channel)}</code> of {repository}{runs}.</p>
     <p class="quiet">To turn it off, on the server: <code>sudo systemctl disable --now fireflyx-deploy.timer</code>. Then
     nothing runs on a schedule.</p>"""
             after = f'<p><a class="button" href="{finish}">Next: {finish_name}</a></p>'
@@ -1362,17 +1380,64 @@ class Console:
 <section class="panel">
     <h1>Updates</h1>
     {note}
-    <p>The deploy agent keeps this server up to date. Every two minutes it looks at master of {repository}, and when it
-    has moved, deploys it: every image pulled first, and a backup that is shown to restore before Firefly III,
+    <p>The deploy agent keeps this server up to date from {repository}. It follows a channel: <code>stable</code>, each
+    release, deployed between 06:00 and 08:00, a new major only once you approve it; <code>latest</code>, every merge
+    into master within two minutes; or one release, such as <code>1.4.2</code>. It never goes back to an older one.
+    Before it deploys, every image is pulled, and a backup that is shown to restore is made before Firefly III,
     Postgres or the importer changes, as they migrate their databases. A failure alerts you.</p>
     <p>It also runs the nightly jobs: the backup at 02:00, the bank import at 03:00, and on Sundays the restore tests,
     from this server's copy and from the offsite one.</p>
     {now}
-    <p class="quiet">Following a release channel (stable or latest) instead of master comes later.</p>
+    <h2>Channel</h2>
+    {self.channel_form(channel, values or {}, errors or {})}
     <h2>Next</h2>
     {after}
   </section>"""
         return self.page(status, "Updates", body, signed_in=True, nav=stepper(UPDATES, state))
+
+    def channel_form(self, channel: str, values: dict, errors: dict) -> str:
+        """What the server follows, as radios; one release with its version."""
+        chosen = values.get("channel") or ("version" if RELEASE_RE.fullmatch(channel) else channel)
+        release = values.get("release", channel if RELEASE_RE.fullmatch(channel) else "")
+        radios = "".join(
+            f'<label class="choice"><input type="radio" name="channel" value="{key}"'
+            f'{" checked" if chosen == key else ""}> <span><strong>{name}</strong>: {about}</span></label>'
+            for key, (name, about) in CHANNELS.items()
+        )
+        error = errors.get("release", "")
+        return f"""
+    <form method="post" action="/updates/channel" novalidate>
+      <fieldset class="field"><legend>This server follows</legend>{radios}
+        {f'<p class="error">{esc(errors["channel"])}</p>' if errors.get("channel") else ''}</fieldset>
+      <div class="field">
+        <label for="release">The release, for one release</label>
+        <input id="release" name="release" value="{esc(release)}" autocomplete="off" spellcheck="false"
+               inputmode="decimal" placeholder="1.4.2"
+               aria-describedby="release-help{' release-error' if error else ''}"{' aria-invalid="true"' if error else ''}>
+        {f'<p class="error" id="release-error">{esc(error)}</p>' if error else ''}
+        <p class="quiet" id="release-help">As the release is named on GitHub, without the v.</p>
+      </div>
+      <button type="submit">Save the channel</button>
+    </form>
+    <p class="quiet">A new channel applies from the deploy agent's next run, within two minutes, without waiting for
+    the morning. It never goes back to an older release than the one that runs: it waits until the channel passes
+    it. On the server, <code>scripts/firefly-pocket updates</code> says what runs and what waits.</p>"""
+
+    def save_channel(self, req: Request) -> Response:
+        if not account_made(read_status(self.status_file)):
+            return self.updates_page(req, 409)
+        form = req.form()
+        choice = form.get("channel", "")
+        release = form.get("release", "").strip().removeprefix("v")
+        errors: dict[str, str] = {}
+        if choice not in CHANNELS:
+            errors["channel"] = "Stable, latest or one release"
+        elif choice == "version" and not RELEASE_RE.fullmatch(release):
+            errors["release"] = "A release such as 1.4.2: three numbers with dots"
+        if errors:
+            return self.updates_page(req, 400, values={"channel": choice, "release": release}, errors=errors)
+        return self.hand_over(req, "channel", {"channel": release if choice == "version" else choice},
+                              self.updates_page)
 
     def save_updates(self, req: Request) -> Response:
         state = read_status(self.status_file)

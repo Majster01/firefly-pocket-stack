@@ -1,43 +1,38 @@
 #!/usr/bin/env bash
 #
-# The server agent (the "Server agent" plan): it will deploy from the release
-# bundle instead of the git checkout. For now it runs in shadow mode (step 1):
-# beside each git deploy it fetches the bundle latest names, compares it with
-# the checkout the deploy ran, and deploys nothing.
+# The server agent's registry side: the release bundles of
+# ghcr.io/majster01/firefly-pocket-stack, read anonymously (the bundle is
+# public), with no docker login and no token on the server. scripts/deploy.sh
+# uses it to follow the server's channel; CI and scripts/upgrade-test.sh to
+# fetch and compare bundles.
 #
-#     scripts/agent.sh shadow                       # deploy.sh runs it when there is nothing to deploy
 #     scripts/agent.sh resolve [<tag>]              # the digest a tag names now; default latest
+#     scripts/agent.sh release-of <sha256:…>        # the release X.Y.Z that names that digest
 #     scripts/agent.sh fetch <tag|sha256:…> <dir>   # extract a bundle into an empty directory
 #     scripts/agent.sh compare <bundle-dir>         # its files against this checkout
 #
-# shadow, once for each revision the server deployed:
-#   1. resolve latest to a digest: GHCR's registry API, anonymously, as the
-#      bundle is public. No docker login and no token on the server
-#   2. fetch that bundle: its manifest and layer, each checked against its
-#      digest, extracted into a temporary directory
-#   3. if it is another revision's bundle, wait: master moved and its deploy or
-#      its Publish bundle run is not done yet. A later tick looks again, once
-#      latest or the deployed revision has moved
-#   4. compare, below
-#   5. record it: a line in .shadow.log, the commit status agent/shadow on
-#      GitHub (with DEPLOY_STATUS_TOKEN, like deploy/server), and on a
-#      difference an alert to ntfy
+# resolve exits 3 when the registry has no such tag (stable before the first
+# release), and 1 on any other failure. release-of prints nothing when no
+# release names the digest yet (a release half pushed).
 #
-# What "no difference" means:
-#   - the bundle holds the same files as the checkout tracks under BUNDLE_PATHS
+# A bundle is the same as a checkout when:
+#   - it holds the same files as the checkout tracks under BUNDLE_PATHS
 #     (scripts/lib.sh), with the same contents and executable bits
 #   - in compose/docker-compose.yml only the image lines differ: the bundle pins
 #     each of the checkout's image:tag to a digest
-#   - each of those digests is the image the server pulled for that tag.
-#     shadow only: compare checks files, for CI, which has not pulled them
 # The bundle's release.json has nothing to compare with.
 #
-# Needs curl, jq and tar; shadow also docker and the server's compose/.env.
+# LOCAL_BUNDLES=<dir> stands in for the registry, for the tests: <dir>/tags/<tag>
+# holds a digest, and <dir>/<digest>/ the bundle's files.
+#
+# Needs curl, jq and tar.
 
 set -euo pipefail
 shopt -s inherit_errexit
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=channels.sh
+source "$REPO_ROOT/scripts/channels.sh"
 IMAGE="${IMAGE:-ghcr.io/majster01/firefly-pocket-stack}"
 REGISTRY="${IMAGE%%/*}"
 REPOSITORY="${IMAGE#*/}"
@@ -45,33 +40,44 @@ REPOSITORY="${IMAGE#*/}"
 # platform fits all. An index is refused.
 MANIFEST_TYPES="application/vnd.oci.image.manifest.v1+json,application/vnd.docker.distribution.manifest.v2+json"
 
-SHADOW_REV="$REPO_ROOT/.shadow-rev"     # the deployed revision compared last
-SHADOW_WAIT="$REPO_ROOT/.shadow-wait"   # "<deployed> <digest>": latest named another revision
-SHADOW_LOG="$REPO_ROOT/.shadow.log"     # a line for each comparison
-
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 trap 'exit 143' TERM   # deploy.sh's timeout: clean up all the same
 
 die() { echo "agent: $*" >&2; exit 1; }
-usage() { sed -n '8,11s/^#     //p' "${BASH_SOURCE[0]}" >&2; exit 2; }
+usage() { sed -n '9,12s/^#     //p' "${BASH_SOURCE[0]}" >&2; exit 2; }
 sha256_of() { echo "sha256:$(sha256sum "$1" | cut -d' ' -f1)"; }
-short_digest() { echo "${1:0:19}"; }   # sha256: and 12 hex digits
 indent() { sed 's/^/    /'; }
 
 # ------------------------------------------------------------- registry ---
-# resolve <tag|digest>: the bundle's manifest into $TMP/manifest.json, its
-# digest into DIGEST and a pull token into TOKEN. The digest is worked out from
-# the manifest's bytes, not taken from the registry's word for it.
-resolve() {
-  local ref="$1" at=":" type
-  [[ "$ref" == sha256:* ]] && at="@"
+# token: a pull token into TOKEN, once.
+token() {
+  [ -z "${TOKEN:-}" ] || return 0
   TOKEN="$(curl -fsS --max-time 30 "https://$REGISTRY/token?scope=repository:$REPOSITORY:pull" | jq -er .token)" \
     || die "no pull token from $REGISTRY"
-  curl -fsS --max-time 60 --max-filesize 1048576 -o "$TMP/manifest.json" \
+}
+
+# resolve <tag|digest>: the bundle's manifest into $TMP/manifest.json, its
+# digest into DIGEST and a pull token into TOKEN. The digest is worked out from
+# the manifest's bytes, not taken from the registry's word for it. A tag the
+# registry does not have exits 3.
+resolve() {
+  local ref="$1" at=":" type code
+  [[ "$ref" == sha256:* ]] && at="@"
+  if [ -n "${LOCAL_BUNDLES:-}" ]; then
+    resolve_local "$ref"
+    return 0
+  fi
+  token
+  code="$(curl -sS --max-time 60 --max-filesize 1048576 -o "$TMP/manifest.json" -w '%{http_code}' \
       -H "Authorization: Bearer $TOKEN" -H "Accept: $MANIFEST_TYPES" \
-      "https://$REGISTRY/v2/$REPOSITORY/manifests/$ref" \
-    || die "no manifest for $IMAGE$at$ref"
+      "https://$REGISTRY/v2/$REPOSITORY/manifests/$ref")" \
+    || die "no answer from $REGISTRY for $IMAGE$at$ref"
+  case "$code" in
+    200) ;;
+    404) echo "agent: $IMAGE has no $ref" >&2; exit 3 ;;
+    *) die "$REGISTRY answered $code for $IMAGE$at$ref" ;;
+  esac
   DIGEST="$(sha256_of "$TMP/manifest.json")"
   if [ "$at" = "@" ] && [ "$DIGEST" != "$ref" ]; then
     die "$REGISTRY sent a manifest for $ref whose digest is $DIGEST"
@@ -83,11 +89,64 @@ resolve() {
   esac
 }
 
+# resolve_local <tag|digest>: resolve, from LOCAL_BUNDLES.
+resolve_local() {
+  if [[ "$1" == sha256:* ]]; then
+    DIGEST="$1"
+  elif [ -f "$LOCAL_BUNDLES/tags/$1" ]; then
+    DIGEST="$(cat "$LOCAL_BUNDLES/tags/$1")"
+  else
+    echo "agent: $LOCAL_BUNDLES has no $1" >&2
+    exit 3
+  fi
+  [ -d "$LOCAL_BUNDLES/$DIGEST" ] || die "$LOCAL_BUNDLES has no bundle $DIGEST"
+}
+
+# tags: every tag of the bundle, a page at a time (GHCR pages the list, and a
+# sha- tag per merge fills pages quickly), following the Link header.
+tags() {
+  local url="https://$REGISTRY/v2/$REPOSITORY/tags/list?n=1000" pages=0
+  if [ -n "${LOCAL_BUNDLES:-}" ]; then
+    ls "$LOCAL_BUNDLES/tags"
+    return 0
+  fi
+  token
+  while [ -n "$url" ]; do
+    pages=$((pages + 1))
+    [ "$pages" -le 100 ] || die "more than 100 pages of tags"
+    curl -fsS --max-time 60 -D "$TMP/headers" -o "$TMP/tags.json" \
+        -H "Authorization: Bearer $TOKEN" "$url" \
+      || die "could not list the tags of $IMAGE"
+    jq -r '.tags[]?' "$TMP/tags.json"
+    url="$(next_page "$REGISTRY" "$TMP/headers")"
+  done
+}
+
+# release_of <digest>: the newest release tag, X.Y.Z, that names the digest;
+# nothing when none does. Newest first, so stable's is the first one tried.
+release_of() {
+  local want="$1" tag
+  # First, not in the loop's process substitution: a failed listing stops here.
+  tags > "$TMP/tags"
+  while IFS= read -r tag; do
+    resolve "$tag"
+    if [ "$DIGEST" = "$want" ]; then
+      echo "$tag"
+      return 0
+    fi
+  done < <(releases_newest_first < "$TMP/tags")
+}
+
 # extract <dir>: the layers of the manifest resolve fetched, each checked
 # against its digest, into <dir>. Files and directories only: a bundle has no
 # links, and a layer that deletes files (a whiteout) is not one of ours.
 extract() {
   local dir="$1" digest type odd
+  if [ -n "${LOCAL_BUNDLES:-}" ]; then
+    cp -a "$LOCAL_BUNDLES/$DIGEST/." "$dir/"
+    [ -f "$dir/release.json" ] || die "no release.json in $LOCAL_BUNDLES/$DIGEST"
+    return 0
+  fi
   while read -r digest type; do
     case "$type" in
       application/vnd.oci.image.layer.v1.tar+gzip|application/vnd.docker.image.rootfs.diff.tar.gzip) ;;
@@ -150,74 +209,16 @@ compare_files() {
   fi
 }
 
-# compare_images <bundle-dir>: is each image the bundle pins the one the server
-# pulled for its tag? By the digests docker recorded at the pull.
-compare_images() {
-  local ref named digest have
-  while read -r ref; do
-    [[ "$ref" == *@sha256:* ]] || continue   # compare_files says so
-    named="${ref%@*}"
-    digest="${ref##*@}"
-    if ! have="$(docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$named" 2>/dev/null)"; then
-      echo "not on the server: $named"
-    elif ! grep -qF "@$digest" <<<"$have"; then
-      have="$(sed -n '1s/.*@//p' <<<"$have")"
-      echo "another image: the server pulled $named as $(short_digest "${have:-no digest}"), the bundle pins $(short_digest "$digest")"
-    fi
-  done < <(bundle_images "$1")
-}
-
-# --------------------------------------------------------------- shadow ---
-shadow() {
-  # shellcheck source=lib.sh
-  source "$REPO_ROOT/scripts/lib.sh"
-  local deployed short commit version diffs n
-  deployed="$(cat "$REPO_ROOT/.deployed-rev" 2>/dev/null || true)"
-  [ -n "$deployed" ] || return 0                                          # nothing deployed yet
-  [ "$deployed" != "$(cat "$SHADOW_REV" 2>/dev/null || true)" ] || return 0   # compared already
-
-  resolve latest
-  [ "$deployed $DIGEST" != "$(cat "$SHADOW_WAIT" 2>/dev/null || true)" ] || return 0
-  mkdir "$TMP/bundle"
-  extract "$TMP/bundle"
-  commit="$(jq -r .commit "$TMP/bundle/release.json")"
-  version="$(jq -r .version "$TMP/bundle/release.json")"
-  short="${deployed:0:7}"
-  if [ "$commit" != "$deployed" ]; then
-    echo "==> shadow: latest is the bundle of ${commit:0:7}, the server runs $short; looking again when either moves"
-    echo "$deployed $DIGEST" > "$SHADOW_WAIT"
-    return 0
-  fi
-  rm -f "$SHADOW_WAIT"
-
-  diffs="$(compare_files "$TMP/bundle"; compare_images "$TMP/bundle")"
-  if [ -z "$diffs" ]; then
-    echo "$(date -Is) $short $version $DIGEST same" >> "$SHADOW_LOG"
-    echo "==> shadow: the bundle of $short ($version) is the same as the checkout"
-    commit_status agent/shadow "$deployed" success "bundle $version is the same as the checkout"
-  else
-    n="$(wc -l <<<"$diffs")"
-    if [ "$n" -eq 1 ]; then n="1 difference"; else n="$n differences"; fi
-    { echo "$(date -Is) $short $version $DIGEST DIFFERENT: $n"; indent <<<"$diffs"; } >> "$SHADOW_LOG"
-    echo "==> shadow: the bundle of $short ($version) has $n from the checkout:"
-    indent <<<"$diffs"
-    commit_status agent/shadow "$deployed" failure "bundle $version: $n from the checkout, listed in .shadow.log"
-    notify_ntfy "Firefly Pocket: the bundle of $short differs from the checkout" "Shadow mode, nothing was deployed from it. In /opt/fireflyx/.shadow.log:
-$diffs"
-  fi
-  echo "$deployed" > "$SHADOW_REV"
-}
-
 # ----------------------------------------------------------------- main ---
 case "${1:-}" in
-  shadow)
-    [ "$#" -eq 1 ] || usage
-    shadow
-    ;;
   resolve)
     [ "$#" -le 2 ] || usage
     resolve "${2:-latest}"
     echo "$DIGEST"
+    ;;
+  release-of)
+    [ "$#" -eq 2 ] && [[ "$2" =~ ^sha256:[0-9a-f]{64}$ ]] || usage
+    release_of "$2"
     ;;
   fetch)
     [ "$#" -eq 3 ] || usage

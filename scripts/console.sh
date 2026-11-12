@@ -71,6 +71,9 @@
 #                        the password the console showed you to keep, or one restic uses
 #                        already opened with its password (empty: this server's). Empty S3
 #                        keys keep the server's. All of it kept once the repository opens
+#       {"action": "channel", "code": "...", "channel": "stable" or "latest" or "X.Y.Z"}
+#                        the release channel the deploy agent follows (scripts/channels.sh),
+#                        kept as CHANNEL once config check takes it
 #       {"action": "updates", "code": "..."}
 #                        the wizard's updates step: the deploy agent turned on, with
 #                        install-deploy-agent.sh for this checkout. Its timer is a systemd
@@ -98,6 +101,8 @@ shopt -s inherit_errexit
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 COMPOSE_DIR="$REPO_ROOT/compose"
+# shellcheck source=paths.sh
+source "$REPO_ROOT/scripts/paths.sh"
 CONSOLE_DIR="$COMPOSE_DIR/console"
 INBOX="$CONSOLE_DIR/inbox"
 STATUS="$CONSOLE_DIR/status/status.json"
@@ -230,19 +235,34 @@ extras_json() {
     --arg ntfy "$(last4 NTFY_URL)" --argjson checks "$checks" \
     --arg repository "$repository" --arg key_id "$(last4 AWS_ACCESS_KEY_ID)" \
     --arg secret_key "$(last4 AWS_SECRET_ACCESS_KEY)" --argjson restic "$restic" \
-    --argjson agent "$agent" --arg origin "$(origin_shown)" '
+    --argjson agent "$agent" --arg origin "$(origin_shown)" \
+    --arg channel "$(stored CHANNEL)" --arg version "$(version_shown)" '
     { suggestions: {anthropic: $anthropic, gemini: $gemini, model: (if $model == "" then $default else $model end)},
       alerts: {ntfy: $ntfy, healthchecks: $checks},
       backups: {repository: $repository, access_key_id: $key_id, secret_access_key: $secret_key, restic: $restic},
-      updates: {agent: $agent, origin: $origin} }'
+      updates: {agent: $agent, origin: $origin, channel: $channel, version: $version} }'
 }
 
-# origin_shown: the repository this checkout follows, as the console may show
-# it: a token in its URL is not, as a password in a restic repository's is not.
+# origin_shown: the repository this server deploys from, as the console may
+# show it: a token in its URL is not, as a password in a restic repository's is
+# not. A release says it in its release.json, a checkout in its origin.
 origin_shown() {
   local origin
-  origin="$(git -C "$REPO_ROOT" remote get-url origin 2>/dev/null || true)"
+  if [ -f "$REPO_ROOT/release.json" ]; then
+    origin="$(jq -r '.source // empty' "$REPO_ROOT/release.json" 2>/dev/null || true)"
+  else
+    origin="$(git -C "$REPO_ROOT" remote get-url origin 2>/dev/null || true)"
+  fi
   [ -z "$origin" ] || restic_shown "$origin"
+}
+
+# version_shown: what runs: the release deployed last, or the release this is.
+version_shown() {
+  if [ -s "$STATE_DIR/.deployed-version" ]; then
+    cat "$STATE_DIR/.deployed-version"
+  elif [ -f "$REPO_ROOT/release.json" ]; then
+    jq -r '.version // empty' "$REPO_ROOT/release.json" 2>/dev/null || true
+  fi
 }
 
 write_status() {
@@ -288,7 +308,7 @@ apply_one() {
   local id="$1" file="$2" code given token
   ACTION="$(jq -r 'if type == "object" and (.action | type) == "string" then .action else "" end' <"$file" 2>/dev/null || true)"
   case "$ACTION" in
-    server | account | bank_key | bank | suggestions | ntfy | ntfy_test | healthchecks | backups | updates | finish | signout) ;;
+    server | account | bank_key | bank | suggestions | ntfy | ntfy_test | healthchecks | backups | updates | channel | finish | signout) ;;
     *)
       ACTION=""
       result "$id" refused "Not a request this version of the server knows."
@@ -746,7 +766,33 @@ apply_updates() {
     result "$id" failed "The installer ran, but fireflyx-deploy.timer is not on. On the server: systemctl status fireflyx-deploy.timer"
     return 1
   fi
-  result "$id" applied "The deploy agent is on. Within two minutes it deploys master of $(origin_shown) and installs the nightly jobs: the backup at 02:00, the bank import at 03:00 and the restore tests on Sundays."
+  result "$id" applied "The deploy agent is on. Within two minutes it deploys $(origin_shown) and installs the nightly jobs: the backup at 02:00, the bank import at 03:00 and the restore tests on Sundays. It follows the $(stored CHANNEL | grep . || echo latest) channel, which this page changes."
+  return 1
+}
+
+# apply_channel <id> <file>: 1, always: the deploy agent reads CHANNEL from
+# .env on its next run, within two minutes.
+apply_channel() {
+  local id="$1" file="$2" channel out what
+  channel="$(string_of "$file" channel)"
+  if ! "$FP" config check CHANNEL - >/dev/null 2>&1 <<<"$channel"; then
+    result "$id" refused "Not a channel: stable, latest, or a release such as 1.4.2."
+    return 1
+  fi
+  if ! out="$("$FP" config set CHANNEL - 2>&1 <<<"$channel")"; then
+    result "$id" failed "The settings store did not take it: ${out#FATAL: }"
+    return 1
+  fi
+  case "$channel" in
+    stable) what="each release, between 06:00 and 08:00; a new major waits until you approve it" ;;
+    latest) what="every change merged into master, within two minutes" ;;
+    *) what="the release $channel, and nothing after it" ;;
+  esac
+  if agent_on; then
+    result "$id" applied "Saved: this server follows $channel, $what. The deploy agent follows it from its next run, within two minutes; it never goes back to an older release than the one that runs."
+  else
+    result "$id" applied "Saved: this server follows $channel, $what, once the deploy agent is on."
+  fi
   return 1
 }
 

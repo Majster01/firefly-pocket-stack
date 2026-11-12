@@ -48,6 +48,7 @@
   "HEALTHCHECK_NIGHTLY_URL":    { "kind": "secret",    "check": "url" },
   "HEALTHCHECK_BACKUP_URL":     { "kind": "secret",    "check": "url" },
   "DEPLOY_STATUS_TOKEN":        { "kind": "secret",    "check": "apikey" },
+  "CHANNEL":                    { "kind": "config",    "check": "channel",   "default": "latest" },
   "VAPID_PUBLIC_KEY":           { "kind": "generated", "check": "base64url" },
   "VAPID_PRIVATE_KEY":          { "kind": "generated", "check": "base64url" },
   "VAPID_SUBJECT":              { "kind": "config",    "check": "contact" },

@@ -751,12 +751,13 @@ step_backups() {
 step_updates() {
   heading "Updates"
   if agent_on; then
-    ok "the deploy agent is on: it deploys every merge into master within two minutes"
+    ok "the deploy agent is on: it follows the $(sed -n 's/^CHANNEL=//p' "$COMPOSE_DIR/.env" 2>/dev/null | tail -n 1 | grep . || echo latest) channel (scripts/firefly-pocket updates)"
     return 0
   fi
-  say "The deploy agent keeps this server on master of $(git -C "$REPO_ROOT" remote get-url origin 2>/dev/null || echo "this repository"):" \
-      "it deploys every merge into it within two minutes, and its first run installs the nightly" \
-      "jobs: the import, the backup, the restore tests (README \"Deploying\")."
+  say "The deploy agent keeps this server up to date. It follows the stable channel: each release" \
+      "of firefly-pocket-stack, deployed between 06:00 and 08:00, a new major only once you approve" \
+      "it (scripts/firefly-pocket config set CHANNEL latest follows every merge into master instead)." \
+      "Its first run installs the nightly jobs: the import, the backup, the restore tests (README \"Deploying\")."
   if confirm "Turn it on?" y; then
     REPO_DIR="$REPO_ROOT" "$REPO_ROOT/scripts/install-deploy-agent.sh" | sed 's/^/   /'
   else

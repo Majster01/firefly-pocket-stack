@@ -41,9 +41,12 @@ backups/
 
 .DS_Store
 
-# Deploy agent state on the server (scripts/deploy.sh, scripts/agent.sh).
+# Deploy agent state on a server that is still a git checkout (scripts/deploy.sh,
+# scripts/adopt.sh); a server of release bundles keeps it in /opt/fireflyx-shared.
 .deployed-rev
 .deploy-failed
+.adopt-failed
+.compose-before.yml
 .shadow-rev
 .shadow-wait
 .shadow.log

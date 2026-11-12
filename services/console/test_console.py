@@ -929,14 +929,17 @@ class ConsoleTest(unittest.TestCase):
         self.bank_status()
         cookie = self.sign_in()
         page = self.call("GET", "/updates", cookie=cookie).body.decode()
-        for want in ('aria-current="step">Updates', f"master of <code>{ORIGIN}</code>", "nothing runs on a schedule",
+        for want in ('aria-current="step">Updates', f"from <code>{ORIGIN}</code>", "<code>stable</code>", "nothing runs on a schedule",
                      'action="/updates"', "Turn on the deploy agent", "sudo without a password", "Skip it for now",
                      "setup updates"):
             self.assertIn(want, page)
         self.assertNotIn("over SSH for now", page)
+        self.bank_status(updates={"agent": True, "origin": ORIGIN, "channel": "stable", "version": "1.2.0"})
+        page = self.call("GET", "/updates", cookie=cookie).body.decode()
+        self.assertIn(f"The deploy agent is on: this server follows <code>stable</code> of <code>{ORIGIN}</code>, and runs <code>1.2.0</code>.", page)
         self.bank_status(updates={"agent": True, "origin": ORIGIN})
         page = self.call("GET", "/updates", cookie=cookie).body.decode()
-        self.assertIn(f"The deploy agent is on: this server follows master of <code>{ORIGIN}</code>", page)
+        self.assertIn(f"this server follows <code>latest</code> of <code>{ORIGIN}</code>.", page)
         self.assertIn("Next: Finish", page)
         self.assertNotIn('action="/updates"', page)
 
@@ -957,6 +960,41 @@ class ConsoleTest(unittest.TestCase):
         page = self.call("GET", location, cookie=cookie).body.decode()
         self.assertIn("<h1>Turned on</h1>", page)
         self.assertIn("Next: Finish", page)
+
+    def test_updates_page_shows_the_channel(self):
+        self.bank_status()
+        cookie = self.sign_in()
+        page = self.call("GET", "/updates", cookie=cookie).body.decode()
+        self.assertIn('action="/updates/channel"', page)
+        self.assertIn('value="stable" checked', page)  # what turning the agent on here sets
+        self.bank_status(updates={"agent": True, "origin": ORIGIN})
+        page = self.call("GET", "/updates", cookie=cookie).body.decode()
+        self.assertIn('value="latest" checked', page)  # an agent from before channels follows master
+        self.bank_status(updates={"agent": True, "origin": ORIGIN, "channel": "1.4.2"})
+        page = self.call("GET", "/updates", cookie=cookie).body.decode()
+        self.assertIn('value="version" checked', page)
+        self.assertIn('name="release" value="1.4.2"', page)
+
+    def test_channel_hands_the_request_to_the_agent(self):
+        self.bank_status()
+        cookie = self.sign_in()
+        for form, want in (("channel=latest", "latest"), ("channel=stable&release=9.9.9", "stable"),
+                           ("channel=version&release=1.4.2", "1.4.2"), ("channel=version&release=v2.0.0", "2.0.0")):
+            location, request = self.request_of(self.call("POST", "/updates/channel", form, cookie=cookie))
+            self.assertEqual({k: request[k] for k in ("action", "channel")}, {"action": "channel", "channel": want})
+        self.assertIn(b"Saving the channel", self.call("GET", location, cookie=cookie).body)
+
+    def test_channel_refuses_what_is_no_channel(self):
+        self.bank_status()
+        cookie = self.sign_in()
+        for form, error in (("channel=master", "Stable, latest or one release"), ("", "Stable, latest or one release"),
+                            ("channel=version&release=1.4", "A release such as 1.4.2"),
+                            ("channel=version&release=01.4.2", "A release such as 1.4.2"),
+                            ("channel=version", "A release such as 1.4.2")):
+            response = self.call("POST", "/updates/channel", form, cookie=cookie)
+            self.assertEqual(response.status, 400, form)
+            self.assertIn(error, response.body.decode())
+        self.assertEqual(os.listdir(self.inbox), [])
 
     def test_finish_lists_every_step(self):
         self.bank_status(app_id=APP_ID, suggestions={"anthropic": "…wxyz", "gemini": "", "model": "claude-haiku-5-5"},

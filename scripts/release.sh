@@ -10,8 +10,10 @@
 #   3. the commit's published bundle, ghcr.io/majster01/firefly-pocket-stack:
 #      sha-<commit>, with the signature Publish bundle gave it on master
 #      (Release pipeline step 9)
-#   4. that bundle gets the tags X.Y.Z, X.Y and stable, by digest: stable is
-#      the very bundle that ran as latest, and carries the same signature
+#   4. that bundle gets the tags X.Y.Z and stable, by digest: stable is the
+#      very bundle that ran as latest, and carries the same signature. Servers
+#      follow latest, stable or an exact X.Y.Z (scripts/deploy.sh); there is no
+#      X.Y tag, as only master is released and a line would stop at the next minor
 #   5. the git tag vX.Y.Z, and a GitHub release that lists the components,
 #      read from the bundle's own release.json, and the changes
 #
@@ -69,7 +71,6 @@ else
   esac
   echo "==> $last -> $version ($bump)"
 fi
-line="${version%.*}"
 
 # -------------------------------------------------------------- canary gate ---
 # Your server is the canary. The evidence is the deploy/server status deploy.sh
@@ -172,7 +173,7 @@ build="$(jq -r .version "$work/release.json")"
 } > "$work/notes.md"
 
 if dry; then
-  echo "==> DRY_RUN: would tag $IMAGE@$digest as $version, $line and stable, push v$version on $short, and publish:"
+  echo "==> DRY_RUN: would tag $IMAGE@$digest as $version and stable, push v$version on $short, and publish:"
   echo
   cat "$work/notes.md"
   exit 0
@@ -182,15 +183,15 @@ fi
 # --prefer-index=false: the same manifest under more tags, so every tag has the
 # bundle's own digest (without it, buildx wraps it in a new index).
 docker buildx imagetools create --prefer-index=false \
-  -t "$IMAGE:$version" -t "$IMAGE:$line" -t "$IMAGE:stable" "$IMAGE@$digest"
-for tag in "$version" "$line" stable; do
+  -t "$IMAGE:$version" -t "$IMAGE:stable" "$IMAGE@$digest"
+for tag in "$version" stable; do
   got="$(digest_of "$IMAGE:$tag")"
   if [ "$got" != "$digest" ]; then
     echo "FATAL: $IMAGE:$tag is $got, not $digest." >&2
     exit 1
   fi
 done
-echo "    $version, $line and stable = $digest"
+echo "    $version and stable = $digest"
 
 git tag -a "v$version" "$commit" -m "firefly-pocket-stack $version"
 git push -q origin "refs/tags/v$version"

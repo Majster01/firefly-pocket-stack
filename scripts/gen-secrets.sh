@@ -16,12 +16,14 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-ENV_FILE="$REPO_ROOT/compose/.env"
+# shellcheck source=paths.sh
+source "$REPO_ROOT/scripts/paths.sh"
+ENV_FILE="$STATE_DIR/compose/.env"
 FP="$REPO_ROOT/scripts/firefly-pocket"
 CADDY_IMAGE="caddy:2.11.7-alpine"
 
 STORE=""
-if [ -f "$REPO_ROOT/compose/config.json" ] || [ ! -f "$ENV_FILE" ]; then
+if [ -f "$STATE_DIR/compose/config.json" ] || [ ! -f "$ENV_FILE" ]; then
   STORE=1
 fi
 

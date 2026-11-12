@@ -7,6 +7,7 @@
 #     scripts/firefly-pocket config ...       the settings (scripts/config.sh says how)
 #     scripts/firefly-pocket console ...      the console's host side (scripts/console.sh says how)
 #     scripts/firefly-pocket tokens [rotate]  the apps' Firefly III tokens (scripts/tokens.sh says how)
+#     scripts/firefly-pocket updates ...      what the server deploys, and when (scripts/updates.sh says how)
 
 set -euo pipefail
 
@@ -16,11 +17,13 @@ case "${1:-}" in
   config) shift; exec "$here/config.sh" "$@" ;;
   console) shift; exec "$here/console.sh" "$@" ;;
   tokens) shift; exec "$here/tokens.sh" "$@" ;;
+  updates) shift; exec "$here/updates.sh" "$@" ;;
   *)
     echo "usage: scripts/firefly-pocket setup [<step>|web]" >&2
     echo "       scripts/firefly-pocket config <list|get|set|unset|has|check|render|import> ..." >&2
     echo "       scripts/firefly-pocket console <apply|status|install|client|expire>" >&2
     echo "       scripts/firefly-pocket tokens [rotate [--days N]]" >&2
+    echo "       scripts/firefly-pocket updates [status|now|approve]" >&2
     exit 2
     ;;
 esac

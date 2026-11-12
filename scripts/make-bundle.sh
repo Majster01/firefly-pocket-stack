@@ -13,17 +13,24 @@
 # docker buildx (it reads digests from the registries, anonymously) and docker
 # compose (it checks the result).
 #
-# The files keep their paths in this repository, so a server can diff a bundle
+# The files keep their paths in this repository, so a bundle can be diffed
 # against a checkout: scripts/agent.sh compare, which CI runs on each bundle it
-# assembles, and the server agent's shadow mode. Only the image lines differ.
+# assembles. Only the image lines differ.
 #
 # Versions: a master build is numbered after the next minor, so after v1.4.2
-# it is 1.5.0-dev.<n>, <n> being the commits on master since that tag, and it
-# sorts after 1.4.2 and before 1.5.0. Before the first release, 1.0.0-dev.<n>.
+# it is 1.5.0-dev.<n>, <n> being the commits on master since v1.4.0, the start
+# of that line: a patch release (v1.4.2) does not start the count again, so the
+# builds of one line only go up. It sorts after 1.4.2 and before 1.5.0. Before
+# the first release, 1.0.0-dev.<n>. release.json also has "build", the commits
+# on master up to this one: a number that only goes up, which the server agent
+# orders bundles by (scripts/channels.sh), as a released bundle keeps the dev
+# version it was built with.
 
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=channels.sh
+source "$REPO_ROOT/scripts/channels.sh"
 out="${1:-}"
 rev="${2:-HEAD}"
 if [ -z "$out" ]; then
@@ -35,6 +42,11 @@ if [ -e "$out" ] && [ -n "$(ls -A "$out")" ]; then
   exit 1
 fi
 git() { command git -C "$REPO_ROOT" "$@"; }
+# A shallow clone counts too few commits, and numbers the bundle wrong.
+if [ "$(git rev-parse --is-shallow-repository)" = true ]; then
+  echo "FATAL: $REPO_ROOT is a shallow clone; the version needs the history (fetch-depth: 0)." >&2
+  exit 1
+fi
 commit="$(git rev-parse --verify "$rev^{commit}")"
 
 # Everything a server reads, and nothing it does not: BUNDLE_PATHS in that
@@ -48,13 +60,8 @@ mkdir -p "$out"
 git archive "$commit" -- "${PATHS[@]}" | tar -x -C "$out"
 
 # ------------------------------------------------------------------ version ---
-last="$(git describe --tags --abbrev=0 --match 'v[0-9]*.[0-9]*.[0-9]*' "$commit" 2>/dev/null || true)"
-if [ -n "$last" ]; then
-  IFS=. read -r major minor _ <<<"${last#v}"
-  version="$major.$((minor + 1)).0-dev.$(git rev-list --count --first-parent "$last..$commit")"
-else
-  version="1.0.0-dev.$(git rev-list --count --first-parent "$commit")"
-fi
+version="$(bundle_version "$REPO_ROOT" "$commit")"
+build="$(git rev-list --count --first-parent "$commit")"
 
 # ------------------------------------------------------------------ digests ---
 # digest_of <image:tag>: the digest the tag names now; for a multi-platform
@@ -98,13 +105,14 @@ awk '
   in_services && /^  [a-z][a-z0-9_-]*:[[:space:]]*$/ { svc = $1; sub(/:$/, "", svc); next }
   in_services && svc != "" && /^    image:[[:space:]]/ { print svc, $2 }' "$compose" \
 | jq -R -s \
-    --arg version "$version" --arg commit "$commit" \
+    --arg version "$version" --argjson build "$build" --arg commit "$commit" \
     --arg created "$(git show -s --format=%cI "$commit")" \
     --arg migrating "$migrating" '
   ($migrating | split(" ")) as $m
   | {
       schema: 1,
       version: $version,
+      build: $build,
       commit: $commit,
       created: $created,
       source: "https://github.com/Majster01/firefly-pocket-stack",

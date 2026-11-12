@@ -4,7 +4,9 @@
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 COMPOSE_DIR="$REPO_ROOT/compose"
-ENV_FILE="$COMPOSE_DIR/.env"
+# shellcheck source=paths.sh
+source "$REPO_ROOT/scripts/paths.sh"
+ENV_FILE="$STATE_DIR/compose/.env"
 
 # Small pinned image used to make HTTP calls on the internal Docker network,
 # so automation never has to go out through Caddy (and therefore never has to
@@ -20,12 +22,23 @@ CONSOLE_NETWORK="fireflyx_console"
 # shellcheck disable=SC2034  # used by deploy.sh
 MIGRATING="app db importer"
 
+# The lock the deploy, the switch to release bundles and every cron job take
+# (crontab), so none runs beside another. Moved for the tests only.
+# shellcheck disable=SC2034  # used by deploy.sh and adopt.sh
+LOCK_FILE="${FIREFLYX_LOCK:-/run/lock/fireflyx.lock}"
+
+# The services that bind-mount files of the release: the deploy recreates them
+# on every release, as a container keeps the release directory it was created
+# with (scripts/deploy.sh). db's initdb/ is read only when its volume is new.
+# shellcheck disable=SC2034  # used by deploy.sh and adopt.sh
+RELEASE_MOUNTS="caddy console importer"
+
 # What the release bundle holds: everything a server reads, and nothing it
 # does not, so no CI, Terraform, docs or the suggester's source (its image is
 # in the bundle by digest). The console's source is in it: compose runs it on
 # the stock python image, mounted. scripts/make-bundle.sh reads this line to
-# build the bundle, and the server agent's shadow mode to compare one with the
-# checkout.
+# build the bundle, scripts/agent.sh to compare one with a checkout, and
+# scripts/adopt.sh to make a server's first release out of its checkout.
 # shellcheck disable=SC2034  # read by make-bundle.sh and agent.sh, not sourced
 BUNDLE_PATHS="LICENSE crontab host scripts config services/console compose/docker-compose.yml compose/Caddyfile compose/.env.example compose/initdb compose/legal compose/secrets compose/importer"
 
@@ -105,14 +118,14 @@ json_string() {
 # commit_status <context> <rev> <state> <description>
 #
 # Optional: what the server did with a revision, as a commit status on GitHub,
-# so the commit list shows it: deploy/server (deploy.sh) and agent/shadow
-# (agent.sh). DEPLOY_STATUS_TOKEN in .env is a fine-grained token for this
+# so the commit list shows it: deploy/server (deploy.sh), which the release's
+# canary gate reads (scripts/release.sh). DEPLOY_STATUS_TOKEN in .env is a fine-grained token for this
 # repository only, "Commit statuses: write". The token goes to curl on stdin,
 # so it does not show in `ps`.
 commit_status() {
   [ -n "${DEPLOY_STATUS_TOKEN:-}" ] || return 0
   local slug
-  slug="$(git -C "$REPO_ROOT" remote get-url origin | sed -E 's#^(git@github\.com:|https://github\.com/)##; s#\.git$##')"
+  slug="$(repo_url | sed -E 's#^(git@github\.com:|https://github\.com/)##; s#\.git$##')"
   printf 'header = "Authorization: Bearer %s"\n' "$DEPLOY_STATUS_TOKEN" \
     | curl -fsS --max-time 15 -o /dev/null --config - \
         -H 'Accept: application/vnd.github+json' \
@@ -218,13 +231,38 @@ notify_import_results() {
   [ "$failed" -eq 0 ]
 }
 
-# compose_images <rev>: "<service> <image>" for every service of compose/docker-compose.yml at <rev>.
+# link_state <release dir>: point the release's state paths (STATE_PATHS,
+# paths.sh) and its .state at STATE_DIR, replacing what the bundle has there
+# (the .gitkeep of an empty directory). A state path the server does not have
+# yet is a link to nothing, as a missing file was before.
+link_state() {
+  local dir="$1" p
+  for p in $STATE_PATHS; do
+    rm -rf "${dir:?}/$p"
+    mkdir -p "$(dirname "$dir/$p")"
+    ln -s "$STATE_DIR/$p" "$dir/$p"
+  done
+  ln -sfn "$STATE_DIR" "$dir/.state"
+}
+
+# repo_url: the repository this server deploys from: a release says so in its
+# release.json, a git checkout in its origin.
+repo_url() {
+  if [ -f "$REPO_ROOT/release.json" ]; then
+    jq -r '.source // empty' "$REPO_ROOT/release.json"
+  else
+    git -C "$REPO_ROOT" remote get-url origin 2>/dev/null || true
+  fi
+}
+
+# compose_images <compose file>: "<service> <image>" for every service in it.
 compose_images() {
-  git -C "$REPO_ROOT" show "$1:compose/docker-compose.yml" 2>/dev/null | awk '
+  [ -f "$1" ] || return 0
+  awk '
     /^services:/ { in_services = 1; next }
     in_services && /^[^ #]/ { in_services = 0 }
     in_services && /^  [a-z][a-z0-9_-]*:[[:space:]]*$/ { svc = $1; sub(/:$/, "", svc); next }
-    in_services && svc != "" && /^    image:[[:space:]]/ { print svc, $2 }'
+    in_services && svc != "" && /^    image:[[:space:]]/ { print svc, $2 }' "$1"
 }
 
 # package_label <service>
@@ -255,9 +293,9 @@ package_version() {
   return 0
 }
 
-# upgraded_packages <old-rev> <new-rev>
+# upgraded_packages <old compose file> <new compose file>
 #
-# One line per package whose image changed between the two revisions, as a
+# One line per package whose image changed between the two, as a
 # person would say it: "Firefly III 6.6.6 → 6.7.0", or just "Firefly Pocket"
 # when only a build changed. Nothing when no package changed.
 upgraded_packages() {
@@ -268,8 +306,15 @@ upgraded_packages() {
   while read -r svc image; do
     [ -n "$svc" ] || continue
     previous="$(awk -v s="$svc" '$1 == s { print $2 }' <<<"$old_images")"
-    # A service that is new is not an upgrade, one whose tag is the same is not either
-    { [ -n "$previous" ] && [ "$previous" != "$image" ]; } || continue
+    # A service that is new is not an upgrade, one whose tag is the same is not
+    # either: a checkout names image:tag, a bundle pins image:tag@digest, so
+    # the digests count only when both sides have one.
+    [ -n "$previous" ] || continue
+    if [[ "$previous" != *@sha256:* || "$image" != *@sha256:* ]]; then
+      [ "${previous%@sha256:*}" != "${image%@sha256:*}" ] || continue
+    else
+      [ "$previous" != "$image" ] || continue
+    fi
     label="$(package_label "$svc")"
     from="$(package_version "$previous")"
     to="$(package_version "$image")"
