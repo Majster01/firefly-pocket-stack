@@ -269,6 +269,7 @@ class ConsoleTest(unittest.TestCase):
         self.assertIn('value="you@example.com"', page)
         self.assertIn('value="Europe/Ljubljana"', page)  # no TZ stored: the host's
         self.assertIn("*.fx.example.com", page)
+        self.assertIn("<code>fx.example.com</code></td><td>A</td>", page)  # the bare domain is Pocket's
         self.assertIn("203.0.113.5", page)
         self.assertIn(HOST, page)
         self.assertIn("valid until 2027-02-01", page)

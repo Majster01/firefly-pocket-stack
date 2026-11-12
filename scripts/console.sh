@@ -8,9 +8,8 @@
 #                                              console saves something (uses sudo)
 #     scripts/firefly-pocket console client    the "Sign in with Firefly III" clients of the
 #                                              console and of Firefly Pocket, registered in
-#                                              Firefly III (account.sh); with --if-missing,
-#                                              only when one is not there yet, as the deploy
-#                                              runs it
+#                                              Firefly III (account.sh), moved to the
+#                                              hostnames in use; the deploy runs it
 #     scripts/firefly-pocket console expire    revoke the console's Firefly III tokens older
 #                                              than eight hours, as the crontab does hourly
 #
@@ -837,13 +836,11 @@ cmd_bank() {
   echo "DONE: Saved: Enable Banking accepts a request signed with this server's key for $(eb_about). ${notes:+$notes }Link a bank from Firefly Pocket: Bank connections."
 }
 
-# console.sh client [--if-missing]: the console's sign-in client (account.sh),
-# once Firefly III has its account; then the status, which carries its ID.
+# console.sh client: the sign-in clients (account.sh), made or moved to this
+# server's hostnames, once Firefly III has its account; then the status, which
+# carries their IDs. The deploy runs it.
 cmd_client() {
   account_made || die "Firefly III has no account yet: the account step registers the clients"
-  if [ "${1:-}" = --if-missing ] && [ -n "$(stored CONSOLE_CLIENT_ID)" ] && [ -n "$(stored POCKET_CLIENT_ID)" ]; then
-    return 0
-  fi
   # shellcheck source=lib.sh
   source "$REPO_ROOT/scripts/lib.sh"
   # shellcheck source=account.sh
@@ -994,7 +991,7 @@ case "${1:-}" in
   apply) cmd_apply ;;
   status) write_status ;;
   install) cmd_install ;;
-  client) cmd_client "${2:-}" ;;
+  client) cmd_client ;;
   expire) cmd_expire ;;
   _owner) cmd_owner "${2:?}" ;;
   _account) cmd_account "${2:?}" ;;

@@ -39,7 +39,7 @@ Everything except Firefly III itself is an **API client** using a Personal Acces
 
 ## Prerequisites
 
-- A domain you control, with the ability to add a wildcard A record (a subdomain of it works too)
+- A domain you control, with the ability to add an A record for the domain and a wildcard one (a subdomain of it works too)
 - A [Hetzner Cloud](https://console.hetzner.cloud) account and API token
 - An [Enable Banking](https://enablebanking.com) account — **check your bank is in their coverage first**; if it is not, the import design needs rethinking
 - An [Anthropic API key](https://console.anthropic.com/) on an account with credit
@@ -68,7 +68,9 @@ Lock `ssh_source_ips` to your own address if it is static — it is the single h
 *.<domain>   ->  <ip>
 ```
 
-They cover the five names the stack answers on: `<domain>` itself (Firefly Pocket), `iii.` (Firefly III), `admin.` (its console), `import.` and `legal.`. The wildcard does not cover the bare domain, hence the first record. `<domain>` can be a subdomain of yours, e.g. `family.example.com` for Firefly Pocket on `family.example.com` and Firefly III on `iii.family.example.com`; it is the domain you give the setup wizard (`DOMAIN`). Caddy still gets a certificate for each name, not a wildcard one, so it needs no DNS API token. A provider without wildcard records takes the five names as A records instead. Each name can also be set on its own (`FIREFLY_HOSTNAME`, `NEXT_HOSTNAME`, `ADMIN_HOSTNAME`, `IMPORT_HOSTNAME`, `LEGAL_HOSTNAME`, with `scripts/firefly-pocket config set`), e.g. to keep the one a server already uses; then its record is up to you. A server with no `DOMAIN` has no console name until `ADMIN_HOSTNAME` is set; Caddy serves it as `admin.localhost` meanwhile, which no one outside reaches by name.
+They cover the five names the stack answers on: `<domain>` itself (Firefly Pocket), `iii.` (Firefly III), `admin.` (its console), `import.` and `legal.`. The wildcard does not cover the bare domain, hence the first record. `<domain>` can be a subdomain of yours, e.g. `money.example.com` for Firefly Pocket on `money.example.com` and Firefly III on `iii.money.example.com`; it is the domain you give the setup wizard (`DOMAIN`). Caddy still gets a certificate for each name, not a wildcard one, so it needs no DNS API token. A provider without wildcard records takes the five names as A records instead. Each name can also be set on its own (`FIREFLY_HOSTNAME`, `NEXT_HOSTNAME`, `ADMIN_HOSTNAME`, `IMPORT_HOSTNAME`, `LEGAL_HOSTNAME`, with `scripts/firefly-pocket config set`), e.g. to keep the one a server already uses; then its record is up to you. A server with no `DOMAIN` has no console name until `ADMIN_HOSTNAME` is set; Caddy serves it as `admin.localhost` meanwhile, which no one outside reaches by name.
+
+Firefly Pocket sits on the domain itself and every name sends HSTS with `includeSubDomains`, so browsers that visit it will use HTTPS only, for a year, on every subdomain of `<domain>`. Give the stack a domain (or subdomain) of its own, not one that serves other sites over plain HTTP.
 
 Optionally add a CAA record, so no certificate authority other than Let's Encrypt may issue for the domain: `<domain>  CAA  0 issue "letsencrypt.org"`.
 
@@ -131,7 +133,7 @@ A private fork is fetched with a read-only deploy key instead. Give the script t
 `scripts/firefly-pocket setup bank` does the Enable Banking part (it is a step of the full run too, and the console's third page during setup in the browser, which hands out the certificate as a download):
 
 1. It makes a private key and a certificate on the server. The key never leaves it; the certificate is `compose/secrets/eb/application.crt`.
-2. In the Enable Banking control panel you register a **production** application with that certificate as its public key, and two **redirect URLs**, exactly so: `https://<domain>/eb-callback`, where links started from Firefly Pocket come back, and `https://import.<domain>/eb-callback`, for the importer's own UI (your `NEXT_HOSTNAME` and `IMPORT_HOSTNAME`, where you set those). Caddy sends a callback whose state starts with `fx-` to the importer fork on either host, and on `app.` one with the importer's own UUID state on to its pages at `https://admin.<domain>/importer/`. Its privacy policy and terms are `https://legal.<domain>/privacy` and `/terms`.
+2. In the Enable Banking control panel you register a **production** application with that certificate as its public key, and two **redirect URLs**, exactly so: `https://<domain>/eb-callback`, where links started from Firefly Pocket come back, and `https://import.<domain>/eb-callback`, for the importer's own UI (your `NEXT_HOSTNAME` and `IMPORT_HOSTNAME`, where you set those). Caddy sends a callback whose state starts with `fx-` to the importer fork on either host, and on `<domain>` one with the importer's own UUID state on to its pages at `https://admin.<domain>/importer/`. Its privacy policy and terms are `https://legal.<domain>/privacy` and `/terms`.
 3. You paste back the application ID. It is kept only once Enable Banking takes a request signed with the key for it, and it says whether the application is sandbox or production, and whether both redirect URLs are registered (`scripts/bank.sh`; `scripts/set-eb-key.sh` does the same for a PEM made elsewhere: `scripts/set-eb-key.sh <private.pem> <application-id>`).
 
 Then link the bank in Firefly Pocket: **Bank connections → Connect a bank** ([Adding another bank account](#adding-another-bank-account)). The importer's own UI is the fallback when Firefly Pocket is not reachable:

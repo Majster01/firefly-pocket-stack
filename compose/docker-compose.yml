@@ -68,10 +68,11 @@ services:
       - caddy_config:/config
     environment:
       ACME_EMAIL: ${ACME_EMAIL:?set ACME_EMAIL in .env}
-      # Each host is <name>.DOMAIN (Firefly III iii.DOMAIN, Pocket DOMAIN itself) unless .env sets it on its own, so a server
-      # with all four set needs no DOMAIN. The same defaults are written out
-      # wherever a URL needs a host below, and in scripts/lib.sh, which is what
-      # refuses to go on when a name and DOMAIN are both missing. Compose
+      # Each host is <name>.DOMAIN (Pocket's is DOMAIN itself) unless .env sets
+      # it on its own, so a server with all four set needs no DOMAIN. The same
+      # defaults are written out wherever a URL needs a host below, and in
+      # scripts/lib.sh, which is what refuses to go on when a name and DOMAIN
+      # are both missing. Compose
       # cannot: some versions evaluate a ${DOMAIN:?...} inside a default even
       # when the name is set.
       FIREFLY_HOSTNAME: ${FIREFLY_HOSTNAME:-iii.${DOMAIN:-}}
