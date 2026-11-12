@@ -28,7 +28,13 @@ set -euo pipefail
 shopt -s inherit_errexit
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-COMPOSE_DIR="$REPO_ROOT/compose"
+# shellcheck source=paths.sh
+source "$REPO_ROOT/scripts/paths.sh"
+# shellcheck source=channels.sh
+source "$REPO_ROOT/scripts/channels.sh"
+# The store and .env, where the server keeps them: under STATE_DIR, as every
+# write here is a rename, which would replace a release's link to them.
+COMPOSE_DIR="$STATE_DIR/compose"
 SCHEMA="$REPO_ROOT/scripts/settings.json"
 CONFIG="$COMPOSE_DIR/config.json"
 SECRETS="$COMPOSE_DIR/secrets/env"
@@ -91,6 +97,8 @@ check_value() {
       [[ "$v" =~ $re ]] || echo "a whole number above 0" ;;
     bool)
       [[ "$v" == true || "$v" == false ]] || echo "true or false" ;;
+    channel)
+      channel_valid "$v" || echo "latest, stable, or a release such as 1.4.2" ;;
     fraction)
       re='^(0(\.[0-9]+)?|1(\.0+)?)$'
       [[ "$v" =~ $re ]] || echo "a number from 0 to 1, such as 0.6" ;;

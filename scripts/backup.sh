@@ -100,12 +100,14 @@ fi
 cp "$ENV_FILE" "$BACKUP_DIR/env-${STAMP}.bak"
 # The settings store (scripts/config.sh), where a server has one: .env is
 # written from it, and holds every value too.
-if [ -f "$COMPOSE_DIR/config.json" ]; then
-  (umask 077 && tar czf "$BACKUP_DIR/settings-${STAMP}.tar.gz" -C "$COMPOSE_DIR" config.json secrets/env) \
+# From STATE_DIR (lib.sh), not through a release's links, which tar would
+# archive as links.
+if [ -f "$STATE_DIR/compose/config.json" ]; then
+  (umask 077 && tar czf "$BACKUP_DIR/settings-${STAMP}.tar.gz" -C "$STATE_DIR/compose" config.json secrets/env) \
     || fail "settings archive failed"
 fi
-if ls "$REPO_ROOT"/config/importers/*.json >/dev/null 2>&1; then
-  tar czf "$BACKUP_DIR/importers-${STAMP}.tar.gz" -C "$REPO_ROOT" \
+if ls "$STATE_DIR"/config/importers/*.json >/dev/null 2>&1; then
+  tar czf "$BACKUP_DIR/importers-${STAMP}.tar.gz" -C "$STATE_DIR" \
     --exclude='config/importers/.backup' config/importers \
     || fail "importer config archive failed"
 fi

@@ -90,8 +90,33 @@ expect_refused "a timezone that does not exist" fp set TZ Mars/Olympus_Mons
 expect_refused "a confidence above 1" fp set SUGGESTER_MIN_CONFIDENCE 2
 expect_refused "a \$ in a name" fp set LEGAL_OWNER_NAME 'A $HOME'
 expect_refused "an empty value" fp set ACME_EMAIL ''
+expect_refused "a channel that is a line" fp set CHANNEL 1.2
+expect_refused "a channel with a v" fp set CHANNEL v1.2.3
+expect_refused "a channel that is a branch" fp set CHANNEL master
 [ "$(sha256sum compose/config.json compose/.env)" = "$before" ] && ok "a refused value changes nothing" || fail "a refused value changed the store or .env"
 fp unset TZ >/dev/null && [ "$(value TZ)" = Etc/UTC ] && ok "unset goes back to the default" || fail "unset TZ did not give Etc/UTC"
+fp set CHANNEL stable >/dev/null && fp set CHANNEL 1.2.3 >/dev/null && [ "$(value CHANNEL)" = 1.2.3 ] \
+  && ok "CHANNEL takes stable and a release" || fail "CHANNEL: $(value CHANNEL)"
+fp unset CHANNEL >/dev/null && [ "$(value CHANNEL)" = latest ] && ok "CHANNEL is latest unless set" || fail "CHANNEL defaults to $(value CHANNEL)"
+
+echo "==> a server of release bundles: the store under its shared state"
+# A release links its state to /opt/fireflyx-shared (scripts/paths.sh,
+# lib.sh's link_state). Every write here is a rename, which must land in the
+# shared directory and leave the release's links as they are.
+mkdir -p "$work/shared" "$work/release"
+cp -a compose "$work/shared/"
+cp -r scripts "$work/release/"
+mkdir -p "$work/release/compose"
+for p in compose/.env compose/config.json compose/.env.rendered compose/secrets; do
+  ln -s "$work/shared/$p" "$work/release/$p"
+done
+ln -s "$work/shared" "$work/release/.state"
+"$work/release/scripts/firefly-pocket" config set TZ Europe/Ljubljana >/dev/null
+[ -L "$work/release/compose/config.json" ] && [ -L "$work/release/compose/.env" ] \
+  && ok "the release's links stay links" || fail "a write replaced a release's link with a file"
+grep -qx 'TZ=Europe/Ljubljana' "$work/shared/compose/.env" && [ "$(jq -r .TZ "$work/shared/compose/config.json")" = Europe/Ljubljana ] \
+  && ok "the value is in the shared store and .env" || fail "the shared store or .env does not have TZ"
+[ -z "$(find "$work/release/compose" -maxdepth 1 -type f)" ] && ok "nothing is written into the release" || fail "files in the release: $(find "$work/release/compose" -maxdepth 1 -type f)"
 
 echo "==> secrets"
 key="sk-ant-api03-$(printf 'x%.0s' {1..40})WXYZ"

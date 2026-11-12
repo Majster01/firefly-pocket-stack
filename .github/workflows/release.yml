@@ -1,7 +1,7 @@
 # Release a commit of master (Release pipeline step 6), by hand: Actions ->
 # Release -> Run workflow. scripts/release.sh does the work: the version from
 # the last vX.Y.Z tag and the bump (the first release is 1.0.0), the release
-# tags X.Y.Z, X.Y and stable on the commit's published bundle, by digest and
+# tags X.Y.Z and stable on the commit's published bundle, by digest and
 # without rebuilding, then the git tag and a GitHub release that lists the
 # components. Tick "Dry run" first to see the version and the notes.
 #

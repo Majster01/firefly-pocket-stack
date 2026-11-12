@@ -568,9 +568,31 @@ grep -qx "ExecStart=$REPO_ROOT/scripts/deploy.sh" "$jar/systemd/fireflyx-deploy.
   || fail "the deploy unit does not run this checkout's deploy.sh: $(cat "$jar/systemd/fireflyx-deploy.service")"
 grep -qx "User=$(id -un)" "$jar/systemd/fireflyx-deploy.service" || fail "the deploy unit does not run as the agent's user"
 grep -qx 'enable --now fireflyx-deploy.timer' "$jar/systemd/calls" || fail "the timer was not enabled"
+[ "$(scripts/firefly-pocket config get CHANNEL)" = stable ] || fail "a server whose agent is turned on now does not follow stable: $(scripts/firefly-pocket config get CHANNEL)"
 [ "$(jq -r .updates.agent compose/console/status/status.json)" = true ] || fail "the status does not say the agent is on"
 [[ "$(ask_console "$admin/updates")" == *"The deploy agent is on"* ]] || fail "the console does not say the agent is on"
-echo "the deploy agent is turned on only where sudo needs no password, for this checkout"
+post /updates/channel channel=version release=1.2.3
+[ "$posted" = applied ] && [ "$(scripts/firefly-pocket config get CHANNEL)" = 1.2.3 ] \
+  || fail "the console's channel, one release: $posted: $said ($(scripts/firefly-pocket config get CHANNEL))"
+grep -qx 'CHANNEL=1.2.3' compose/.env || fail "the channel is not in compose/.env, where the deploy reads it"
+[[ "$(ask_console "$admin/updates")" == *'name="release" value="1.2.3"'* ]] || fail "the console does not show the release it follows"
+post /updates/channel channel=latest
+[ "$posted" = applied ] && [ "$(scripts/firefly-pocket config get CHANNEL)" = latest ] || fail "the console's channel, latest: $posted: $said"
+post /updates/channel channel=stable
+[ "$posted" = applied ] && [ "$(scripts/firefly-pocket config get CHANNEL)" = stable ] || fail "the console's channel, stable: $posted: $said"
+# What a compromised console could write instead: a line, a value with a
+# setting after a newline, and a channel without the code.
+env_before="$(sha256sum < compose/.env)"
+printf '{"action":"channel","code":"%s","channel":"1.2"}' "$code" > "$inbox/$(fake_id 8).json"
+printf '{"action":"channel","code":"%s","channel":"latest\\nDOMAIN=evil.example"}' "$code" > "$inbox/$(fake_id 9).json"
+printf '{"action":"channel","channel":"latest"}' > "$inbox/$(fake_id 0).json"
+scripts/firefly-pocket console apply >/dev/null
+for forged in 8 9 0; do
+  [ "$(state "$(fake_id $forged)")" = refused ] || fail "the forged channel $(fake_id $forged): $(state "$(fake_id $forged)"), not refused"
+done
+[ "$(scripts/firefly-pocket config get CHANNEL)" = stable ] && [ "$(sha256sum < compose/.env)" = "$env_before" ] \
+  || fail "a forged channel changed CHANNEL or compose/.env"
+echo "the deploy agent is turned on only where sudo needs no password, for this checkout, following stable, which the console changes"
 
 echo "==> the console's Finish: the setup code goes"
 went="$(ask_console "${here[@]}" -o /dev/null -w '%{http_code} %{redirect_url}' --data '' "$admin/finish")"

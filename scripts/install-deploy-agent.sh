@@ -11,7 +11,9 @@
 #    compose/secrets/, config/importers/), and its tracked files are reset to
 #    the revision it was last deployed at, so nothing changes yet.
 # 2. fireflyx-deploy.timer: scripts/deploy.sh every two minutes. Its first run
-#    deploys master. Skipped while compose/.env does not exist (a new server
+#    deploys master; a later one switches the server to release bundles
+#    (scripts/adopt.sh), which follow CHANNEL: stable on a server whose agent
+#    is turned on here for the first time. Skipped while compose/.env does not exist (a new server
 #    in the middle of the README setup); run this again at the end of it.
 #
 # A private fork sets REPO_URL to its SSH address instead,
@@ -36,26 +38,30 @@ KEY="$HOME/.ssh/fireflyx_deploy"
 GITHUB_FP="SHA256:+DiY3wvvV6TuJJhbpZisF/zLDA0zPMSvHdkr4UvCOqU"
 
 cd "$REPO_DIR"
-[ -d .git ] || git init -q -b master
-git remote get-url origin >/dev/null 2>&1 || git remote add origin "$REPO_URL"
-origin="$(git remote get-url origin)"
 
-# ------------------------------------------------------------ access ---
-case "$origin" in
-  https://*)
-    # Public: nothing to authenticate. A key left from an SSH checkout is
-    # not used any more.
-    git config --unset core.sshCommand || true
-    if [ -f "$KEY" ]; then
-      echo "==> origin is $origin, so $KEY is not used any more."
-      echo "    Remove it from the old repository's Settings -> Deploy keys, then: rm $KEY $KEY.pub"
-    fi
-    ;;
-  git@github.com:*)
-    install -d -m 700 "$HOME/.ssh"
-    if [ ! -f "$KEY" ]; then
-      ssh-keygen -q -t ed25519 -N '' -C "fireflyx-deploy@$(hostname -s)" -f "$KEY" </dev/null
-      cat <<EOF
+# checkout: steps 1's git checkout, its access and its first revision. Not on a
+# server of release bundles (scripts/adopt.sh), which has no git.
+checkout() {
+  [ -d .git ] || git init -q -b master
+  git remote get-url origin >/dev/null 2>&1 || git remote add origin "$REPO_URL"
+  origin="$(git remote get-url origin)"
+
+  # ------------------------------------------------------------ access ---
+  case "$origin" in
+    https://*)
+      # Public: nothing to authenticate. A key left from an SSH checkout is
+      # not used any more.
+      git config --unset core.sshCommand || true
+      if [ -f "$KEY" ]; then
+        echo "==> origin is $origin, so $KEY is not used any more."
+        echo "    Remove it from the old repository's Settings -> Deploy keys, then: rm $KEY $KEY.pub"
+      fi
+      ;;
+    git@github.com:*)
+      install -d -m 700 "$HOME/.ssh"
+      if [ ! -f "$KEY" ]; then
+        ssh-keygen -q -t ed25519 -N '' -C "fireflyx-deploy@$(hostname -s)" -f "$KEY" </dev/null
+        cat <<EOF
 Created a deploy key. Add it to GitHub: ${origin#git@github.com:} -> Settings ->
 Deploy keys -> Add deploy key. Any title; leave "Allow write access" OFF.
 
@@ -63,45 +69,51 @@ $(cat "$KEY.pub")
 
 Then run this script again.
 EOF
-      exit 0
-    fi
-
-    if ! ssh-keygen -F github.com -f "$HOME/.ssh/known_hosts" >/dev/null 2>&1; then
-      # No answer from github.com:22 leaves nothing to fingerprint: say so below
-      # rather than stop here without a word.
-      scanned="$(ssh-keyscan -t ed25519 github.com 2>/dev/null || true)"
-      fp="$(printf '%s\n' "$scanned" | ssh-keygen -lf - 2>/dev/null | awk '{print $2}' || true)"
-      if [ "$fp" != "$GITHUB_FP" ]; then
-        echo "FATAL: github.com offered host key ${fp:-none}, expected $GITHUB_FP." >&2
-        exit 1
+        exit 0
       fi
-      printf '%s\n' "$scanned" >> "$HOME/.ssh/known_hosts"
+
+      if ! ssh-keygen -F github.com -f "$HOME/.ssh/known_hosts" >/dev/null 2>&1; then
+        # No answer from github.com:22 leaves nothing to fingerprint: say so below
+        # rather than stop here without a word.
+        scanned="$(ssh-keyscan -t ed25519 github.com 2>/dev/null || true)"
+        fp="$(printf '%s\n' "$scanned" | ssh-keygen -lf - 2>/dev/null | awk '{print $2}' || true)"
+        if [ "$fp" != "$GITHUB_FP" ]; then
+          echo "FATAL: github.com offered host key ${fp:-none}, expected $GITHUB_FP." >&2
+          exit 1
+        fi
+        printf '%s\n' "$scanned" >> "$HOME/.ssh/known_hosts"
+      fi
+      git config core.sshCommand "ssh -i $KEY -o IdentitiesOnly=yes"
+      ;;
+    *)
+      echo "FATAL: origin is $origin; expected https://github.com/... or git@github.com:..." >&2
+      exit 1
+      ;;
+  esac
+
+  # --------------------------------------------------------- git checkout ---
+  # </dev/null: under `bash -s` the script itself is stdin, and ssh would eat it.
+  git fetch -q origin master </dev/null
+
+  if ! git rev-parse -q --verify HEAD >/dev/null; then
+    # Start where the rsync deploys left off, so the agent's first run deploys
+    # master the usual way. A new server starts at master.
+    start="$(cat .deployed-rev 2>/dev/null || true)"
+    git cat-file -e "${start:-none}^{commit}" 2>/dev/null || start="$(git rev-parse FETCH_HEAD)"
+    git reset -q --hard "$start"
+    echo "==> $REPO_DIR is a git checkout at $(git log --oneline -1)"
+    stale="$(git status --porcelain --untracked-files=all | sed -n 's/^?? //p')"
+    if [ -n "$stale" ]; then
+      echo "    Files here that git does not track and does not ignore, probably deleted"
+      echo "    from the repository since they were synced. Check them, and delete the stale ones:"
+      printf '%s\n' "$stale" | sed 's/^/      /'
     fi
-    git config core.sshCommand "ssh -i $KEY -o IdentitiesOnly=yes"
-    ;;
-  *)
-    echo "FATAL: origin is $origin; expected https://github.com/... or git@github.com:..." >&2
-    exit 1
-    ;;
-esac
-
-# --------------------------------------------------------- git checkout ---
-# </dev/null: under `bash -s` the script itself is stdin, and ssh would eat it.
-git fetch -q origin master </dev/null
-
-if ! git rev-parse -q --verify HEAD >/dev/null; then
-  # Start where the rsync deploys left off, so the agent's first run deploys
-  # master the usual way. A new server starts at master.
-  start="$(cat .deployed-rev 2>/dev/null || true)"
-  git cat-file -e "${start:-none}^{commit}" 2>/dev/null || start="$(git rev-parse FETCH_HEAD)"
-  git reset -q --hard "$start"
-  echo "==> $REPO_DIR is a git checkout at $(git log --oneline -1)"
-  stale="$(git status --porcelain --untracked-files=all | sed -n 's/^?? //p')"
-  if [ -n "$stale" ]; then
-    echo "    Files here that git does not track and does not ignore, probably deleted"
-    echo "    from the repository since they were synced. Check them, and delete the stale ones:"
-    printf '%s\n' "$stale" | sed 's/^/      /'
   fi
+}
+if [ -L .state ]; then
+  echo "==> $REPO_DIR deploys release bundles: no git checkout to set up"
+else
+  checkout
 fi
 
 # ----------------------------------------------------------------- timer ---
@@ -110,9 +122,18 @@ if [ ! -f compose/.env ]; then
   exit 0
 fi
 
+# The channel (scripts/channels.sh): a server whose agent is turned on for the
+# first time follows stable, unless it chose one. A server that had the agent
+# before CHANNEL existed keeps following master: scripts/adopt.sh gives it latest.
+if ! systemctl is-enabled --quiet fireflyx-deploy.timer 2>/dev/null \
+   && [ -f compose/config.json ] && ! jq -e 'has("CHANNEL")' compose/config.json >/dev/null; then
+  scripts/firefly-pocket config set --no-render CHANNEL stable >/dev/null
+  echo "==> CHANNEL is stable: this server deploys releases (scripts/firefly-pocket config set CHANNEL latest to follow master)"
+fi
+
 sudo tee /etc/systemd/system/fireflyx-deploy.service >/dev/null <<EOF
 [Unit]
-Description=firefly-pocket-stack: deploy origin/master if it moved (scripts/deploy.sh)
+Description=firefly-pocket-stack: deploy what the channel names, if it moved (scripts/deploy.sh)
 Wants=network-online.target
 After=network-online.target docker.service
 
@@ -126,7 +147,7 @@ EOF
 
 sudo tee /etc/systemd/system/fireflyx-deploy.timer >/dev/null <<EOF
 [Unit]
-Description=firefly-pocket-stack: check for a new master every two minutes
+Description=firefly-pocket-stack: check the channel every two minutes
 
 [Timer]
 OnBootSec=2min

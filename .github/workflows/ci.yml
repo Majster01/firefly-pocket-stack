@@ -3,8 +3,8 @@
 # locally before pushing (AGENTS.md "Checks").
 #
 # One check per job. Their names (shellcheck, compose, suggester, console,
-# boot, bundle, upgrade (stable), upgrade (latest)) are what master's ruleset
-# requires, so rename them only together with it.
+# boot, bundle, adopt, upgrade (stable), upgrade (latest)) are what master's
+# ruleset requires, so rename them only together with it.
 name: CI
 
 on:
@@ -46,6 +46,11 @@ jobs:
       # each command, on a copy in a temporary directory.
       - name: The settings store
         run: scripts/config-test.sh
+
+      # scripts/channels.sh: what the server agent decides about a release,
+      # and the bundle's version, without a registry or Docker.
+      - name: The server agent's decisions
+        run: scripts/channels-test.sh
 
       # A hand-edited .env, as a server set up before the settings store has
       # one, so this also runs gen-secrets.sh the old way (the boot job makes a
@@ -168,10 +173,30 @@ jobs:
           scripts/make-bundle.sh "$RUNNER_TEMP/bundle"
           cat "$RUNNER_TEMP/bundle/release.json"
 
-      # What the server agent's shadow mode checks on the server, files only:
-      # the bundle holds this checkout's files, and only the image lines differ.
+      # The bundle holds this checkout's files, and only the image lines differ.
       - name: Compare it with the checkout
         run: scripts/agent.sh compare "$RUNNER_TEMP/bundle"
+
+  # A server that is a git checkout of the commit this PR starts from, switched
+  # to release bundles by this commit and then following its channel, with a
+  # directory for the registry (scripts/adopt-test.sh): what the merge does to
+  # a server that has not switched yet, and every decision a tick makes.
+  adopt:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0   # the commit the PR starts from, and the bundle's version
+
+      # The boot test of the revision it starts from runs the backups step.
+      - name: Install restic
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq restic
+
+      - name: Switch a server over, then follow a channel
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+        run: scripts/adopt-test.sh
 
   # A published bundle booted, then upgraded to this commit the way a deploy
   # does it, and checked again (Release pipeline step 8): from stable, what new
