@@ -185,6 +185,8 @@ seed() {
 # The answers into the settings store, then the browser setup: the part of the
 # run that needs no DNS and no root, which the boot test runs as it is. Returns
 # REFUSED for an answer the store refuses, which trying again will not change.
+# The timezone is not stored: it sets the host's (cmd_run), and the console's Server
+# step, which also asks for the name on the legal pages, starts from it.
 cmd_configure() {
   local domain email
   domain="$(input domain)"
@@ -192,7 +194,6 @@ cmd_configure() {
   cd "$REPO_ROOT"
   seed DOMAIN "$domain" || return "$REFUSED"
   seed SITE_OWNER "$email" || return "$REFUSED"
-  seed TZ "$(input timezone)" || return "$REFUSED"
   seed SETUP_CODE "$(input setup_code)" || return "$REFUSED"
 
   # The wizard's questions, one line each: the domain and the email keep what is

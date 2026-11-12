@@ -265,9 +265,9 @@ run_boot
 [ "$boot_status" = 0 ] && grep -q 'admin.example.com points to 198.51.100.9, but this server is 203.0.113.7' "$fb/out" \
   && [ "$(wc -l < "$fb/sleeps")" = 1 ] && grep -q 'Point \*.example.com at 203.0.113.7. admin.example.com points to 198.51.100.9' "$fb/banner.waiting" \
   && ok "DNS elsewhere: it waits and names the problem, then goes on once the names point here" || fail "the DNS wait ($boot_status)"
-grep -qx 'DOMAIN=example.com' "$fb/calls" && grep -qx 'SITE_OWNER=me@example.com' "$fb/calls" && grep -qx 'TZ=Europe/Ljubljana' "$fb/calls" \
+grep -qx 'DOMAIN=example.com' "$fb/calls" && grep -qx 'SITE_OWNER=me@example.com' "$fb/calls" \
   && grep -qx 'SETUP_CODE=7B2M-4QX9-C8KD-0VRZ' "$fb/calls" && [ "$(grep -c '^setup web$' "$fb/calls")" = 1 ] \
-  && ok "the four answers are stored, then setup web runs once" || fail "what the run stored: $(tr '\n' ' ' < "$fb/calls")"
+  && ok "the domain, email and setup code are stored, then setup web runs once" || fail "what the run stored: $(tr '\n' ' ' < "$fb/calls")"
 [ ! -e "$fb/inputs.json" ] && grep -q 'https://admin.example.com' "$fb/banner" && grep -qx 'timedatectl set-timezone Europe/Ljubljana' "$fb/calls" \
   && ok "success: first-boot.json is gone, the host's timezone set, the banner names the console" || fail "the end of a good run"
 : > "$fb/calls"
