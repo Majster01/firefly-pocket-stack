@@ -78,6 +78,7 @@ resource "hcloud_server" "fireflyx" {
     admin_user     = var.admin_user
     ssh_public_key = var.ssh_public_key
     timezone       = var.timezone
+    repo_url       = var.repo_url
   })
 
   # IPv4 costs EUR 0.50/mo net and is genuinely required — do not drop it to
@@ -110,5 +111,9 @@ resource "hcloud_server" "fireflyx" {
     # The disk holds the Postgres volume. Never let a routine attribute change
     # silently rebuild this machine.
     prevent_destroy = true
+
+    # Changing user_data forces a new server, and it only ever runs on the
+    # first boot anyway: editing cloud-init.yaml must not plan a replacement.
+    ignore_changes = [user_data]
   }
 }

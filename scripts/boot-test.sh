@@ -133,18 +133,30 @@ trap finish EXIT
 fail() { echo "FATAL: $*" >&2; exit 1; }
 
 # ---------------------------------------------------------- in the browser ---
-# One line per question, in the wizard's order. A question it did not ask
-# before shifts every answer after it, and the run fails.
-web_answers=(
-  localhost        # Domain
-  ci@example.com   # Email
-  ''               # the importer's password, shown once: go on
-)
-echo "==> scripts/firefly-pocket setup web, as a new server starts in the browser"
-printf '%s\n' "${web_answers[@]}" | FIREFLY_POCKET_NO_SYSTEMD=1 scripts/firefly-pocket setup web
+# The answers a server made from firefly-pocket.com/help/hetzner gets in
+# /etc/fireflyx/first-boot.json, and what scripts/first-boot.sh does with them
+# once DNS points at it: into the settings store, then setup web. The wizard's
+# questions it answers, one line each, are listed there: a question it did not
+# ask before shifts every answer after it, and the run fails.
+first_boot_inputs="$jar/first-boot.json"
+printf '{"domain":"localhost","email":"ci@example.com","timezone":"Europe/Ljubljana","setup_code":"7B2M-4QX9-C8KD-0VRZ"}\n' > "$first_boot_inputs"
+echo "==> scripts/first-boot.sh configure, as a new server starts in the browser"
+ADMIN_USER="$(id -un)" FIRST_BOOT_INPUTS="$first_boot_inputs" FIREFLY_POCKET_NO_SYSTEMD=1 scripts/first-boot.sh configure
+echo "==> a first-boot.json with a key missing is refused, and stores nothing"
+printf '{"domain":"elsewhere.example"}\n' > "$jar/short.json"
+if refusal="$(ADMIN_USER="$(id -un)" FIRST_BOOT_INPUTS="$jar/short.json" scripts/first-boot.sh configure 2>&1)"; then
+  fail "first-boot went on with an incomplete first-boot.json"
+fi
+[[ "$refusal" == *'has no "email"'* ]] || fail "first-boot refused an incomplete first-boot.json for another reason: $refusal"
 # lib.sh reads compose/.env, so it comes after it.
 # shellcheck source=lib.sh
 source "$REPO_ROOT/scripts/lib.sh"
+[ "$SETUP_CODE" = 7B2M-4QX9-C8KD-0VRZ ] || fail "first-boot did not store the setup code it was given"
+[ "$VAPID_SUBJECT" = mailto:ci@example.com ] || fail "setup web did not fill the push contact from the email"
+[ "$ACME_EMAIL" = ci@example.com ] && [ "$SITE_OWNER" = ci@example.com ] || fail "first-boot did not store the email"
+# `config has` counts the default, so ask the store itself.
+jq -e 'has("TZ")' compose/config.json >/dev/null && fail "first-boot stored the timezone, which would skip the console's Server step"
+[ "$DOMAIN" = localhost ] || fail "an incomplete first-boot.json changed the domain to $DOMAIN"
 running="$(compose ps --status running --services | sort | paste -sd' ' -)"
 [ "$running" = "caddy console" ] || fail "setup web should start Caddy and the console only, but runs: $running"
 

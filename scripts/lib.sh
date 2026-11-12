@@ -27,7 +27,7 @@ MIGRATING="app db importer"
 # build the bundle, and the server agent's shadow mode to compare one with the
 # checkout.
 # shellcheck disable=SC2034  # read by make-bundle.sh and agent.sh, not sourced
-BUNDLE_PATHS="LICENSE crontab scripts config services/console compose/docker-compose.yml compose/Caddyfile compose/.env.example compose/initdb compose/legal compose/secrets compose/importer"
+BUNDLE_PATHS="LICENSE crontab host scripts config services/console compose/docker-compose.yml compose/Caddyfile compose/.env.example compose/initdb compose/legal compose/secrets compose/importer"
 
 if [ ! -f "$ENV_FILE" ]; then
   echo "FATAL: $ENV_FILE not found. Run scripts/gen-secrets.sh first." >&2

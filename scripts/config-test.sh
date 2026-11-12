@@ -16,6 +16,8 @@
 #   5. import: a server-like hand-edited .env comes out with every value as it
 #      was, keeps the lines no setting reads, and refuses a bad value whole;
 #      list shows a value set to nothing as (empty), and unset removes a kept line
+#   6. scripts/first-boot.sh run, with stand-ins for the network and the server's
+#      commands, host.sh's dns_problems, and the validity of host/'s JSON
 
 # ok always succeeds, so `test && ok ... || fail ...` is an if/else here; and the
 # single-quoted $ in the test values are meant literally.
@@ -189,6 +191,132 @@ grep -q '^TZ  *(empty)$' <<<"$(fp list)" && ok "list shows a setting set to noth
 fp unset PICO_DB_PASSWORD >/dev/null && [ ! -e compose/secrets/env/PICO_DB_PASSWORD ] && ! grep -q '^PICO_DB_PASSWORD=' compose/.env \
   && grep -q '^LOGS_HOSTNAME=' compose/.env && ok "unset removes one kept line, from the store and .env" || fail "unset PICO_DB_PASSWORD"
 expect_refused "unset of a name that is no setting and no kept line" fp unset NO_SUCH_SETTING
+
+echo "==> scripts/first-boot.sh run and host.sh dns_problems, with stand-ins for the network and the server's commands"
+fb="$work/fb"
+mkdir -p "$fb/bin"
+cp -r "$REPO_ROOT/scripts" "$fb/"
+export FB="$fb"
+cat > "$fb/scripts/firefly-pocket" <<'STUB'
+#!/usr/bin/env bash
+if [ "$1 $2" = "config check" ]; then
+  cat > /dev/null
+  [ "$(cat "$FB/refuse" 2>/dev/null)" != "$3" ]
+elif [ "$1 $2" = "config set" ]; then
+  value="$(cat)"
+  echo "$4=$value" >> "$FB/calls"
+  [ "$(cat "$FB/refuse" 2>/dev/null)" != "$4" ]
+elif [ "$1 $2" = "setup web" ]; then
+  cat > /dev/null
+  echo "setup web" >> "$FB/calls"
+  exit "$(cat "$FB/setup-status" 2>/dev/null || echo 0)"
+fi
+STUB
+cat > "$fb/bin/ip" <<'STUB'
+#!/usr/bin/env bash
+[ "$1" = -4 ] || exit 2
+echo "1.1.1.1 via 203.0.113.1 dev eth0 src 203.0.113.7 uid 0"
+STUB
+cat > "$fb/bin/getent" <<'STUB'
+#!/usr/bin/env bash
+case "$1" in ahostsv4) file="$FB/dns" ;; ahostsv6) file="$FB/dns6" ;; *) exit 2 ;; esac
+found=""
+[ -f "$file" ] || exit 2
+while read -r host addr; do
+  [ "$host" = "$2" ] && { echo "$addr STREAM $host"; found=1; }
+done < "$file"
+[ -n "$found" ]
+STUB
+cat > "$fb/bin/timedatectl" <<'STUB'
+#!/usr/bin/env bash
+echo "timedatectl $*" >> "$FB/calls"
+STUB
+cat > "$fb/bin/sleep" <<'STUB'
+#!/usr/bin/env bash
+echo x >> "$FB/sleeps"
+[ "$(wc -l < "$FB/sleeps")" -le 20 ] || kill -9 "$PPID"
+[ ! -x "$FB/on_sleep" ] || "$FB/on_sleep"
+STUB
+chmod +x "$fb/scripts/firefly-pocket" "$fb/bin/"*
+dns_set() { local p; for p in admin firefly app import legal; do echo "$p.example.com $1"; done > "$fb/dns"; : > "$fb/dns6"; }
+good_inputs='{"domain":"example.com","email":"me@example.com","timezone":"Europe/Ljubljana","setup_code":"7B2M-4QX9-C8KD-0VRZ"}'
+fresh() { rm -f "$fb/banner.waiting" "$fb/calls" "$fb/sleeps" "$fb/banner" "$fb/on_sleep" "$fb/refuse" "$fb/setup-status" "$fb/inputs.json"; : > "$fb/calls"; dns_set 203.0.113.7; }
+run_boot() {
+  PATH="$fb/bin:$PATH" ADMIN_USER="$(id -un)" FIRST_BOOT_INPUTS="$fb/inputs.json" FIRST_BOOT_BANNER="$fb/banner" \
+    FIRST_BOOT_WAIT_SECONDS=0 "$fb/scripts/first-boot.sh" run >"$fb/out" 2>&1 && boot_status=0 || boot_status=$?
+}
+
+fresh
+run_boot
+[ "$boot_status" = 0 ] && [ ! -e "$fb/banner" ] && [ ! -s "$fb/calls" ] && ok "no first-boot.json (a Terraform server): nothing happens" || fail "a server with no first-boot.json did something"
+
+fresh
+echo '{"domain":"example.com"}' > "$fb/inputs.json"
+run_boot
+[ "$boot_status" = 65 ] && grep -q 'missing or was refused' "$fb/banner" && [ ! -s "$fb/calls" ] && [ -f "$fb/inputs.json" ] \
+  && ok "a first-boot.json with keys missing: refused for good, with a banner, nothing stored" || fail "an incomplete first-boot.json ($boot_status)"
+
+fresh
+echo "$good_inputs" > "$fb/inputs.json"
+dns_set 198.51.100.9
+printf '#!/usr/bin/env bash\nrm -f "$FB/on_sleep"\ncp "$FB/banner" "$FB/banner.waiting"\nfor p in admin firefly app import legal; do echo "$p.example.com 203.0.113.7"; done > "$FB/dns"\n' > "$fb/on_sleep"
+chmod +x "$fb/on_sleep"
+run_boot
+[ "$boot_status" = 0 ] && grep -q 'admin.example.com points to 198.51.100.9, but this server is 203.0.113.7' "$fb/out" \
+  && [ "$(wc -l < "$fb/sleeps")" = 1 ] && grep -q 'Point \*.example.com at 203.0.113.7. admin.example.com points to 198.51.100.9' "$fb/banner.waiting" \
+  && ok "DNS elsewhere: it waits and names the problem, then goes on once the names point here" || fail "the DNS wait ($boot_status)"
+grep -qx 'DOMAIN=example.com' "$fb/calls" && grep -qx 'SITE_OWNER=me@example.com' "$fb/calls" \
+  && grep -qx 'SETUP_CODE=7B2M-4QX9-C8KD-0VRZ' "$fb/calls" && [ "$(grep -c '^setup web$' "$fb/calls")" = 1 ] \
+  && ok "the domain, email and setup code are stored, then setup web runs once" || fail "what the run stored: $(tr '\n' ' ' < "$fb/calls")"
+[ ! -e "$fb/inputs.json" ] && grep -q 'https://admin.example.com' "$fb/banner" && grep -qx 'timedatectl set-timezone Europe/Ljubljana' "$fb/calls" \
+  && ok "success: first-boot.json is gone, the host's timezone set, the banner names the console" || fail "the end of a good run"
+: > "$fb/calls"
+run_boot
+[ "$boot_status" = 0 ] && [ ! -s "$fb/calls" ] && ok "run again after success: nothing happens" || fail "a second run did something"
+
+fresh
+echo "$good_inputs" > "$fb/inputs.json"
+echo 1 > "$fb/setup-status"
+run_boot
+[ "$boot_status" = 1 ] && [ -f "$fb/inputs.json" ] && grep -q 'tries again' "$fb/banner" \
+  && ok "setup web failing: it is kept to try again (the unit restarts it)" || fail "a failing setup web ($boot_status)"
+
+fresh
+echo "$good_inputs" > "$fb/inputs.json"
+echo TZ > "$fb/refuse"
+run_boot
+[ "$boot_status" = 65 ] && [ -f "$fb/inputs.json" ] && grep -q 'refused' "$fb/banner" && ! grep -q 'setup web\|timedatectl' "$fb/calls" \
+  && ok "an answer the store refuses: stopped for good, and neither setup web nor the timezone ran" || fail "a refused answer ($boot_status)"
+
+fresh
+echo "$good_inputs" > "$fb/inputs.json"
+echo TZ > "$fb/refuse"
+run_boot
+[ "$boot_status" = 65 ] && grep -q 'missing or was refused' "$fb/banner" && [ ! -e "$fb/sleeps" ] && [ ! -s "$fb/calls" ] \
+  && ok "an answer the store would refuse is found before the wait for DNS, not after" || fail "a refused answer found late ($boot_status)"
+
+fresh
+echo "$good_inputs" > "$fb/inputs.json"
+printf '#!/usr/bin/env bash\nexit 2\n' > "$fb/bin/ip"
+run_boot
+[ "$boot_status" = 1 ] && grep -q 'no IPv4 address' "$fb/banner" && [ -f "$fb/inputs.json" ] && [ ! -s "$fb/calls" ] \
+  && ok "no address of its own: the unit retries, and the banner says so" || fail "a server with no IPv4 address ($boot_status)"
+printf '#!/usr/bin/env bash\n[ "$1" = -4 ] || exit 2\necho "1.1.1.1 via 203.0.113.1 dev eth0 src 203.0.113.7 uid 0"\n' > "$fb/bin/ip"
+
+# shellcheck source=host.sh
+source "$REPO_ROOT/scripts/host.sh"
+fresh
+dns_problems_with() { PATH="$fb/bin:$PATH" dns_problems "$@"; }
+[ -z "$(dns_problems_with 203.0.113.7 '' admin.example.com)" ] && ok "dns_problems: a name that points here has none" || fail "dns_problems on a good name"
+[ "$(dns_problems_with 203.0.113.7 '' nope.example.com)" = 'nope.example.com does not resolve yet' ] && ok "dns_problems: a name that does not resolve" || fail "dns_problems on a missing name"
+echo "admin.example.com 2001:db8::5" > "$fb/dns6"
+[ "$(dns_problems_with 203.0.113.7 '' admin.example.com)" = 'admin.example.com has the IPv6 address 2001:db8::5, but this server has none: remove that AAAA record' ] \
+  && ok "dns_problems: an AAAA record on a server with no IPv6" || fail "dns_problems on a stray AAAA"
+[ "$(dns_problems_with 203.0.113.7 2001:db8::1 admin.example.com)" = "admin.example.com points to 2001:db8::5, but this server's IPv6 address is 2001:db8::1" ] \
+  && ok "dns_problems: an AAAA record that is not this server's" || fail "dns_problems on a wrong AAAA"
+: > "$fb/dns6"
+[ -z "$(dns_problems_with 10.0.0.5 '' admin.example.com)" ] && ok "dns_problems: behind NAT only resolution is checked" || fail "dns_problems behind NAT"
+jq -e . "$REPO_ROOT/host/etc/docker/daemon.json" >/dev/null && ok "host/etc/docker/daemon.json is valid JSON: Docker starts on it" || fail "host/etc/docker/daemon.json is not valid JSON"
 
 echo
 if [ "$failures" -gt 0 ]; then
