@@ -713,11 +713,13 @@ class Console:
             return "<p>No names yet: save a domain first.</p>"
         records = ""
         if domain and not is_localhost(domain):
-            rows = f"<tr><td><code>*.{esc(domain)}</code></td><td>A</td><td><code>{esc(v4 or 'this server’s IPv4 address')}</code></td></tr>"
-            if v6:
-                rows += f"<tr><td><code>*.{esc(domain)}</code></td><td>AAAA</td><td><code>{esc(v6)}</code> (optional)</td></tr>"
+            rows = ""
+            for name in (domain, f"*.{domain}"):
+                rows += f"<tr><td><code>{esc(name)}</code></td><td>A</td><td><code>{esc(v4 or 'this server’s IPv4 address')}</code></td></tr>"
+                if v6:
+                    rows += f"<tr><td><code>{esc(name)}</code></td><td>AAAA</td><td><code>{esc(v6)}</code> (optional)</td></tr>"
             records = f"""
-    <p>Point one wildcard record at this server. Let's Encrypt gives each name its certificate once it does.</p>
+    <p>Point the domain itself, which is Firefly Pocket, and a wildcard record at this server: the wildcard does not cover the domain. Let's Encrypt gives each name its certificate once it does.</p>
     <table class="records"><thead><tr><th>Name</th><th>Type</th><th>Value</th></tr></thead><tbody>{rows}</tbody></table>"""
         checks = self.check_names(names, v4, v6)
         rows = ""

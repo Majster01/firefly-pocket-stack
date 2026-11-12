@@ -26,8 +26,7 @@
 #      runs it once, and up -d again, which must recreate nothing: every value
 #      is still the same
 #   7. the sign-in clients of the console and of Firefly Pocket, as the deploy
-#      registers them once on a server set up before them (console client
-#      --if-missing): made in Firefly III's database as it is, Firefly Pocket
+#      registers them on a server set up before them (console client): made in Firefly III's database as it is, Firefly Pocket
 #      started again with its own, and both kept when asked again
 #
 # Needs Docker. Never for the server: like boot-test.sh, it uses the server's
@@ -138,7 +137,7 @@ fi
 echo "==> the sign-in clients, as the deploy registers them on a server set up before them"
 if [ -z "$(scripts/firefly-pocket config get CONSOLE_CLIENT_ID 2>/dev/null)" ] \
    || [ -z "$(scripts/firefly-pocket config get POCKET_CLIENT_ID 2>/dev/null)" ]; then
-  scripts/firefly-pocket console client --if-missing
+  scripts/firefly-pocket console client
   id="$(scripts/firefly-pocket config get CONSOLE_CLIENT_ID)"
   [ -n "$id" ] || { echo "CONSOLE_CLIENT_ID was not kept"; exit 1; }
   [ "$(jq -r .signin.client_id compose/console/status/status.json)" = "$id" ] \

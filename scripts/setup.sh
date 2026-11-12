@@ -175,13 +175,14 @@ reload() {
 }
 
 # The five names, as compose and lib.sh derive them: <name>.<domain> unless one
-# is set on its own. One with neither is left out (without a domain, the
-# console's has no name until ADMIN_HOSTNAME is set).
+# is set on its own (Pocket's is the domain itself). One with neither is left
+# out (without a domain, the console's has no name until ADMIN_HOSTNAME is set).
 names() {
-  local domain="$1" pair value
-  for pair in ADMIN_HOSTNAME:admin FIREFLY_HOSTNAME:firefly NEXT_HOSTNAME:app IMPORT_HOSTNAME:import LEGAL_HOSTNAME:legal; do
+  local domain="$1" pair value prefix
+  for pair in ADMIN_HOSTNAME:admin FIREFLY_HOSTNAME:iii NEXT_HOSTNAME: IMPORT_HOSTNAME:import LEGAL_HOSTNAME:legal; do
     value="$(stored "${pair%%:*}")"
-    value="${value:-${domain:+${pair#*:}.$domain}}"
+    prefix="${pair#*:}"
+    value="${value:-${domain:+${prefix:+$prefix.}$domain}}"
     [ -z "$value" ] || printf '%s\n' "$value"
   done
 }
@@ -246,12 +247,13 @@ step_domain() {
   v4="$(my_address 4)"
   v6="$(my_address 6)"
   [ -n "$v4" ] || v4="<this server's IPv4 address>"
-  say "Firefly Pocket answers on five names under a domain of yours: firefly.<domain> is Firefly III," \
-      "app.<domain> Firefly Pocket, admin.<domain> its console, import.<domain> the bank importer," \
+  say "Firefly Pocket answers on five names under a domain of yours: <domain> itself is Firefly Pocket," \
+      "iii.<domain> is Firefly III, admin.<domain> its console, import.<domain> the bank importer," \
       "and legal.<domain> the privacy policy and terms. A subdomain works too, such as" \
-      "money.example.com. Point one wildcard record at this server first:" \
+      "money.example.com. Point the domain and a wildcard record at this server first:" \
+      "    <domain>     A      $v4" \
       "    *.<domain>   A      $v4"
-  [ -z "$v6" ] || say "    *.<domain>   AAAA   $v6   (optional)"
+  [ -z "$v6" ] || say "    <domain>     AAAA   $v6   (optional)" "    *.<domain>   AAAA   $v6   (optional)"
   for key in FIREFLY_HOSTNAME NEXT_HOSTNAME IMPORT_HOSTNAME LEGAL_HOSTNAME; do
     [ -n "$(stored "$key")" ] || all_set=""
   done

@@ -74,8 +74,8 @@ jobs:
           expect() {
             [ "$1" = "$2" ] || { printf 'expected: %s\n     got: %s\n' "$2" "$1"; exit 1; }
           }
-          expect "$(hosts)" "firefly.example.com app.example.com import.example.com legal.example.com admin.example.com https://firefly.example.com https://app.example.com https://firefly.example.com https://app.example.com/eb-callback https://app.example.com"
-          expect "$(NEXT_HOSTNAME=next.example.org hosts)" "firefly.example.com next.example.org import.example.com legal.example.com admin.example.com https://firefly.example.com https://next.example.org https://firefly.example.com https://next.example.org/eb-callback https://next.example.org"
+          expect "$(hosts)" "iii.example.com example.com import.example.com legal.example.com admin.example.com https://iii.example.com https://example.com https://iii.example.com https://example.com/eb-callback https://example.com"
+          expect "$(NEXT_HOSTNAME=next.example.org hosts)" "iii.example.com next.example.org import.example.com legal.example.com admin.example.com https://iii.example.com https://next.example.org https://iii.example.com https://next.example.org/eb-callback https://next.example.org"
           # Without DOMAIN the console has no name until ADMIN_HOSTNAME is set:
           # Caddy serves admin.localhost, from its own CA, and asks no ACME CA.
           expect "$(DOMAIN= FIREFLY_HOSTNAME=f.example.net NEXT_HOSTNAME=n.example.net IMPORT_HOSTNAME=i.example.net LEGAL_HOSTNAME=l.example.net hosts)" "f.example.net n.example.net i.example.net l.example.net admin.localhost https://f.example.net https://n.example.net https://f.example.net https://n.example.net/eb-callback https://n.example.net"

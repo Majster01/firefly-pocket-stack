@@ -17,8 +17,8 @@ class FireflyUrlTest(unittest.TestCase):
             with mock.patch.dict(os.environ, environ, clear=True):
                 return Settings.load(env_file, need_model=False)
 
-    def test_firefly_dot_domain_from_a_fresh_env(self):
-        self.assertEqual(self.load("DOMAIN=example.com\n").firefly_url, "https://firefly.example.com")
+    def test_iii_dot_domain_from_a_fresh_env(self):
+        self.assertEqual(self.load("DOMAIN=example.com\n").firefly_url, "https://iii.example.com")
 
     def test_a_hostname_set_on_its_own_wins(self):
         settings = self.load("DOMAIN=example.com\nFIREFLY_HOSTNAME=money.example.org\n")

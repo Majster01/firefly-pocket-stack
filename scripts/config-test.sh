@@ -157,7 +157,7 @@ while IFS= read -r line; do
     *) echo "$line" ;;
   esac
 done < compose/.env.example > compose/.env
-printf '%s\n' FIREFLY_HOSTNAME=firefly.example.org NEXT_HOSTNAME=next.example.org \
+printf '%s\n' FIREFLY_HOSTNAME=iii.example.org NEXT_HOSTNAME=next.example.org \
   IMPORT_HOSTNAME=import.example.org LEGAL_HOSTNAME=legal.example.org \
   LOGS_HOSTNAME=logs.example.org 'PICO_DB_PASSWORD=old$$one' >> compose/.env
 cp compose/.env hand.env
@@ -191,6 +191,20 @@ grep -q '^TZ  *(empty)$' <<<"$(fp list)" && ok "list shows a setting set to noth
 fp unset PICO_DB_PASSWORD >/dev/null && [ ! -e compose/secrets/env/PICO_DB_PASSWORD ] && ! grep -q '^PICO_DB_PASSWORD=' compose/.env \
   && grep -q '^LOGS_HOSTNAME=' compose/.env && ok "unset removes one kept line, from the store and .env" || fail "unset PICO_DB_PASSWORD"
 expect_refused "unset of a name that is no setting and no kept line" fp unset NO_SUCH_SETTING
+
+echo "==> setup.sh names: Pocket's name is the domain itself, the others are <name>.<domain>"
+(
+  # shellcheck disable=SC2329  # names() calls it
+  stored() { local v; for v in $STORED; do [ "${v%%=*}" = "$1" ] && printf '%s' "${v#*=}"; done; true; }
+  # shellcheck disable=SC1090
+  source <(sed -n '/^names() {/,/^}/p' "$REPO_ROOT/scripts/setup.sh")
+  got() { names "$1" | paste -sd' ' -; }
+  STORED=""
+  [ "$(got example.com)" = "admin.example.com iii.example.com example.com import.example.com legal.example.com" ] || { echo "derived: $(got example.com)"; exit 1; }
+  STORED="NEXT_HOSTNAME=next.example.org"
+  [ "$(got example.com)" = "admin.example.com iii.example.com next.example.org import.example.com legal.example.com" ] || { echo "set on its own: $(got example.com)"; exit 1; }
+  [ "$(got "")" = "next.example.org" ] || { echo "no domain: $(got "")"; exit 1; }
+) && ok "names: derived (Pocket on the bare domain), set on its own, and left out without a domain" || fail "setup.sh names"
 
 echo "==> scripts/first-boot.sh run and host.sh dns_problems, with stand-ins for the network and the server's commands"
 fb="$work/fb"
@@ -238,7 +252,7 @@ echo x >> "$FB/sleeps"
 [ ! -x "$FB/on_sleep" ] || "$FB/on_sleep"
 STUB
 chmod +x "$fb/scripts/firefly-pocket" "$fb/bin/"*
-dns_set() { local p; for p in admin firefly app import legal; do echo "$p.example.com $1"; done > "$fb/dns"; : > "$fb/dns6"; }
+dns_set() { local p; { for p in admin iii import legal; do echo "$p.example.com $1"; done; echo "example.com $1"; } > "$fb/dns"; : > "$fb/dns6"; }
 good_inputs='{"domain":"example.com","email":"me@example.com","timezone":"Europe/Ljubljana","setup_code":"7B2M-4QX9-C8KD-0VRZ"}'
 fresh() { rm -f "$fb/banner.waiting" "$fb/calls" "$fb/sleeps" "$fb/banner" "$fb/on_sleep" "$fb/refuse" "$fb/setup-status" "$fb/inputs.json"; : > "$fb/calls"; dns_set 203.0.113.7; }
 run_boot() {
@@ -259,11 +273,11 @@ run_boot
 fresh
 echo "$good_inputs" > "$fb/inputs.json"
 dns_set 198.51.100.9
-printf '#!/usr/bin/env bash\nrm -f "$FB/on_sleep"\ncp "$FB/banner" "$FB/banner.waiting"\nfor p in admin firefly app import legal; do echo "$p.example.com 203.0.113.7"; done > "$FB/dns"\n' > "$fb/on_sleep"
+printf '#!/usr/bin/env bash\nrm -f "$FB/on_sleep"\ncp "$FB/banner" "$FB/banner.waiting"\nfor p in admin iii import legal; do echo "$p.example.com 203.0.113.7"; done > "$FB/dns"; echo "example.com 203.0.113.7" >> "$FB/dns"\n' > "$fb/on_sleep"
 chmod +x "$fb/on_sleep"
 run_boot
 [ "$boot_status" = 0 ] && grep -q 'admin.example.com points to 198.51.100.9, but this server is 203.0.113.7' "$fb/out" \
-  && [ "$(wc -l < "$fb/sleeps")" = 1 ] && grep -q 'Point \*.example.com at 203.0.113.7. admin.example.com points to 198.51.100.9' "$fb/banner.waiting" \
+  && [ "$(wc -l < "$fb/sleeps")" = 1 ] && grep -q 'Point example.com and \*.example.com at 203.0.113.7. admin.example.com points to 198.51.100.9' "$fb/banner.waiting" \
   && ok "DNS elsewhere: it waits and names the problem, then goes on once the names point here" || fail "the DNS wait ($boot_status)"
 grep -qx 'DOMAIN=example.com' "$fb/calls" && grep -qx 'SITE_OWNER=me@example.com' "$fb/calls" \
   && grep -qx 'SETUP_CODE=7B2M-4QX9-C8KD-0VRZ' "$fb/calls" && [ "$(grep -c '^setup web$' "$fb/calls")" = 1 ] \
@@ -273,6 +287,17 @@ grep -qx 'DOMAIN=example.com' "$fb/calls" && grep -qx 'SITE_OWNER=me@example.com
 : > "$fb/calls"
 run_boot
 [ "$boot_status" = 0 ] && [ ! -s "$fb/calls" ] && ok "run again after success: nothing happens" || fail "a second run did something"
+
+# The case that happens in production: the wildcard record set, the domain's own forgotten.
+fresh
+echo "$good_inputs" > "$fb/inputs.json"
+{ for p in admin iii import legal; do echo "$p.example.com 203.0.113.7"; done; } > "$fb/dns"
+printf '#!/usr/bin/env bash\nrm -f "$FB/on_sleep"\ncp "$FB/banner" "$FB/banner.waiting"\necho "example.com 203.0.113.7" >> "$FB/dns"\n' > "$fb/on_sleep"
+chmod +x "$fb/on_sleep"
+run_boot
+[ "$boot_status" = 0 ] && [ "$(wc -l < "$fb/sleeps")" = 1 ] && grep -q '203.0.113.7. example.com does not resolve yet' "$fb/banner.waiting" \
+  && [ "$(grep -c '^setup web$' "$fb/calls")" = 1 ] \
+  && ok "a wildcard without the domain's own record: it waits for the domain, then goes on" || fail "the apex was not waited for ($boot_status): $(cat "$fb/banner.waiting" 2>/dev/null)"
 
 fresh
 echo "$good_inputs" > "$fb/inputs.json"

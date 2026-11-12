@@ -159,7 +159,7 @@ if [ "$ENVIRONMENT" = "SANDBOX" ]; then
   new ID and a new PEM — re-run this script with both, and register
   both redirect URLs on it (README "Connect your bank"; or let
   scripts/firefly-pocket setup bank make the key and certificate):
-  https://app.<DOMAIN>/eb-callback and https://import.<DOMAIN>/eb-callback.
+  https://<DOMAIN>/eb-callback and https://import.<DOMAIN>/eb-callback.
   ------------------------------------------------------------------
 EOF
 fi

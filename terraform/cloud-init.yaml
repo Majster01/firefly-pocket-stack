@@ -36,7 +36,7 @@ final_message: |
   FireflyX host ready.
 
   Next:
-    1. Point a wildcard A record, *.<your domain>, at this machine.
+    1. Point A records for <your domain> and *.<your domain> at this machine.
     2. ssh ${admin_user}@<ip>
     3. Follow README.md "Set it up": scripts/install-deploy-agent.sh finds the
        checkout already in /opt/fireflyx.

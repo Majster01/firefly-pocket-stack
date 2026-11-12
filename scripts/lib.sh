@@ -55,10 +55,11 @@ load_env() {
 load_env
 
 # The hostnames as compose derives them (docker-compose.yml, the caddy
-# service): <name>.DOMAIN unless .env sets one on its own. Compose would make
-# "firefly." of a missing DOMAIN, so the deploy and the tests stop here instead.
-export FIREFLY_HOSTNAME="${FIREFLY_HOSTNAME:-${DOMAIN:+firefly.$DOMAIN}}"
-export NEXT_HOSTNAME="${NEXT_HOSTNAME:-${DOMAIN:+app.$DOMAIN}}"
+# service): <name>.DOMAIN unless .env sets one on its own, Pocket's being
+# DOMAIN itself. Compose would make "iii." of a missing DOMAIN, so the deploy
+# and the tests stop here instead.
+export FIREFLY_HOSTNAME="${FIREFLY_HOSTNAME:-${DOMAIN:+iii.$DOMAIN}}"
+export NEXT_HOSTNAME="${NEXT_HOSTNAME:-${DOMAIN:-}}"
 export IMPORT_HOSTNAME="${IMPORT_HOSTNAME:-${DOMAIN:+import.$DOMAIN}}"
 export LEGAL_HOSTNAME="${LEGAL_HOSTNAME:-${DOMAIN:+legal.$DOMAIN}}"
 for _host in FIREFLY_HOSTNAME NEXT_HOSTNAME IMPORT_HOSTNAME LEGAL_HOSTNAME; do

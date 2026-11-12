@@ -68,14 +68,15 @@ services:
       - caddy_config:/config
     environment:
       ACME_EMAIL: ${ACME_EMAIL:?set ACME_EMAIL in .env}
-      # Each host is <name>.DOMAIN unless .env sets it on its own, so a server
-      # with all four set needs no DOMAIN. The same defaults are written out
-      # wherever a URL needs a host below, and in scripts/lib.sh, which is what
-      # refuses to go on when a name and DOMAIN are both missing. Compose
+      # Each host is <name>.DOMAIN (Pocket's is DOMAIN itself) unless .env sets
+      # it on its own, so a server with all four set needs no DOMAIN. The same
+      # defaults are written out wherever a URL needs a host below, and in
+      # scripts/lib.sh, which is what refuses to go on when a name and DOMAIN
+      # are both missing. Compose
       # cannot: some versions evaluate a ${DOMAIN:?...} inside a default even
       # when the name is set.
-      FIREFLY_HOSTNAME: ${FIREFLY_HOSTNAME:-firefly.${DOMAIN:-}}
-      NEXT_HOSTNAME: ${NEXT_HOSTNAME:-app.${DOMAIN:-}}
+      FIREFLY_HOSTNAME: ${FIREFLY_HOSTNAME:-iii.${DOMAIN:-}}
+      NEXT_HOSTNAME: ${NEXT_HOSTNAME:-${DOMAIN:-}}
       IMPORT_HOSTNAME: ${IMPORT_HOSTNAME:-import.${DOMAIN:-}}
       LEGAL_HOSTNAME: ${LEGAL_HOSTNAME:-legal.${DOMAIN:-}}
       # The console's. A server with no DOMAIN has none until it is set, and
@@ -188,7 +189,7 @@ services:
       # Must be EXACTLY 32 characters or Firefly III refuses to boot.
       APP_KEY: ${FIREFLY_APP_KEY:?run scripts/gen-secrets.sh}
       # Wrong value here breaks redirects, OAuth and the PAT flow.
-      APP_URL: https://${FIREFLY_HOSTNAME:-firefly.${DOMAIN:-}}
+      APP_URL: https://${FIREFLY_HOSTNAME:-iii.${DOMAIN:-}}
       TZ: ${TZ:-Etc/UTC}
       # Behind Caddy: trust the forwarded proto/host headers.
       TRUSTED_PROXIES: "**"
@@ -247,7 +248,7 @@ services:
     networks: [fireflyx]
     environment:
       APP_KEY: ${NEXT_APP_KEY:?run scripts/gen-secrets.sh}
-      APP_URL: https://${NEXT_HOSTNAME:-app.${DOMAIN:-}}
+      APP_URL: https://${NEXT_HOSTNAME:-${DOMAIN:-}}
       # Firefly III on this network, as the importer and the suggester reach
       # it, not out through Caddy and back. Only Pocket's server calls it: the
       # browser talks to Pocket's own /api, never to Firefly III.
@@ -281,7 +282,7 @@ services:
       # Firefly III's own login, at its public address, and Pocket's server
       # swaps the code for a token on this network. Offered only once setup has
       # registered Pocket's public client (scripts/account.sh, pocket_client).
-      FIREFLY_PUBLIC_URL: https://${FIREFLY_HOSTNAME:-firefly.${DOMAIN:-}}
+      FIREFLY_PUBLIC_URL: https://${FIREFLY_HOSTNAME:-iii.${DOMAIN:-}}
       FIREFLY_CLIENT_ID: ${POCKET_CLIENT_ID:-}
     depends_on:
       db:
@@ -318,7 +319,7 @@ services:
     environment:
       # Internal hop to Firefly III; VANITY_URL is what it renders in links.
       FIREFLY_III_URL: http://app:8080
-      VANITY_URL: https://${FIREFLY_HOSTNAME:-firefly.${DOMAIN:-}}
+      VANITY_URL: https://${FIREFLY_HOSTNAME:-iii.${DOMAIN:-}}
       FIREFLY_III_ACCESS_TOKEN: ${IMPORTER_FIREFLY_TOKEN}
       TZ: ${TZ:-Etc/UTC}
       TRUSTED_PROXIES: "**"
@@ -388,8 +389,8 @@ services:
       # its host. The user then lands back in Firefly Pocket, on its
       # /bank-connections pages — the only place the callback ever redirects
       # to.
-      FIREFLY_POCKET_CALLBACK_URL: https://${NEXT_HOSTNAME:-app.${DOMAIN:-}}/eb-callback
-      FIREFLY_POCKET_APP_URL: https://${NEXT_HOSTNAME:-app.${DOMAIN:-}}
+      FIREFLY_POCKET_CALLBACK_URL: https://${NEXT_HOSTNAME:-${DOMAIN:-}}/eb-callback
+      FIREFLY_POCKET_APP_URL: https://${NEXT_HOSTNAME:-${DOMAIN:-}}
       # Banks book late; duplicate detection discards the overlap.
       FIREFLYX_LOOKBACK_DAYS: ${IMPORT_LOOKBACK_DAYS:-5}
       # Per-night import history for Firefly Pocket's System status page (README).
