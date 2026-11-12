@@ -423,7 +423,7 @@ services:
   # a change locally:
   #   docker build -t firefly-pocket-suggester:dev ../services/category-suggester
   suggester:
-    image: ghcr.io/majster01/firefly-pocket-suggester:sha-a6ef2c6
+    image: ghcr.io/majster01/firefly-pocket-suggester:sha-3591af4
     profiles: [jobs]
     logging: *default-logging
     networks: [fireflyx]
