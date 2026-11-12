@@ -215,10 +215,10 @@ There are two kinds of message. **Alerts** (backup, restore test and consent fai
 |---|---|---|
 | Import succeeded | "NLB Current import succeeded", and how many new transactions came in | on; "only when something new came in" on |
 | Import problems | Which bank, what went wrong in plain words, what to do about it, and that the exact error is in the importer logs (`scripts/logs.sh`, or `/var/log/fireflyx/nightly.log`). A night that finds no transactions is not a problem | on |
-| Suggestions waiting | How many category suggestions wait for review; sets the app badge and opens the list | weekly, Monday; or daily; or off |
+| Suggestions waiting | How many category suggestions wait for review; opens the list | weekly, Monday; or daily; or off |
 | Upgrades | "Upgrade successful": Firefly III 6.6.6 → 6.7.0, or just "Firefly Pocket" for a build. Only for a deploy that changed a package; other deploys stay quiet | on |
 
-Notifications go to the Firefly Pocket app only (the devices that want them); ntfy additionally gets import problems, so a broken Firefly Pocket cannot hide a broken import. The digest cron runs every day and Pocket decides who gets it. See `docs/design/push-alerts.md`.
+Notifications go to the Firefly Pocket app only (the devices that want them); ntfy additionally gets import problems, so a broken Firefly Pocket cannot hide a broken import. The digest cron runs every day and Pocket decides who gets it. Pocket keeps every message in its notifications center whatever the settings, and the app badge is the number you have not read there. See `docs/design/push-alerts.md`.
 
 | Setting | What |
 |---|---|

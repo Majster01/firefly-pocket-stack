@@ -446,9 +446,9 @@ def cmd_notify(args: argparse.Namespace, settings: Settings) -> int:
     metas = suggestion_metas(ff.rules(group_id))
     message = reminder(metas)
     if message is None:
-        # Nothing is pushed to clear the app badge: iOS insists a Web Push shows
-        # a notification, so a "0 waiting" push would only be noise. Firefly Pocket clears
-        # the badge itself when it is opened.
+        # Nothing is pushed: iOS insists a Web Push shows a notification, so a
+        # "0 waiting" push would only be noise. The app badge is not ours to clear:
+        # it is the user's unread count in Firefly Pocket's notifications center.
         log("no pending suggestions — nothing sent")
         return EXIT_OK
     push = next_push(settings, message, len(metas))
@@ -469,7 +469,9 @@ def next_push(settings: Settings, message: str, pending: int) -> dict | None:
     """The Web Push body for Firefly Pocket, or None when push is not configured.
 
     The tag makes a newer reminder replace the previous one instead of stacking;
-    the badge is the number of suggestions waiting. The cron job runs every day:
+    the badge is the number of suggestions waiting, which Firefly Pocket ignores
+    since its notifications center (the badge is each user's unread count there);
+    older Pockets still show it. The cron job runs every day:
     each device's setting (off, daily, weekly on a weekday) decides if it arrives.
     """
     if not (settings.next_notify_url and settings.next_notify_token):
