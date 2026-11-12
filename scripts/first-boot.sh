@@ -151,12 +151,13 @@ wait_for_dns() {
   [ -n "$v4" ] || { log "this server has no IPv4 address yet"; return 1; }
   while :; do
     problems=""
-    for prefix in admin firefly app import legal; do
+    for prefix in admin iii import legal; do
       problems="$problems$(dns_problems "$v4" "$v6" "$prefix.$domain")"$'\n'
     done
+    problems="$problems$(dns_problems "$v4" "$v6" "$domain")"$'\n' # Pocket: the domain itself
     first="$(sed -n '/./{p;q;}' <<<"$problems")"
     [ -n "$first" ] || break
-    banner "waiting for DNS. Point *.$domain at $v4. $first"
+    banner "waiting for DNS. Point $domain and *.$domain at $v4. $first"
     if [ $((tries % 10)) = 0 ]; then
       log "waiting: $first"
     fi

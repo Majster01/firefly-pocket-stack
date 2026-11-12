@@ -157,7 +157,7 @@ while IFS= read -r line; do
     *) echo "$line" ;;
   esac
 done < compose/.env.example > compose/.env
-printf '%s\n' FIREFLY_HOSTNAME=firefly.example.org NEXT_HOSTNAME=next.example.org \
+printf '%s\n' FIREFLY_HOSTNAME=iii.example.org NEXT_HOSTNAME=next.example.org \
   IMPORT_HOSTNAME=import.example.org LEGAL_HOSTNAME=legal.example.org \
   LOGS_HOSTNAME=logs.example.org 'PICO_DB_PASSWORD=old$$one' >> compose/.env
 cp compose/.env hand.env
