@@ -1,0 +1,11 @@
+// Two gaps the stock configuration leaves. Kernel and libc updates install
+// but only take effect after a reboot, which nothing ever does; and Docker CE
+// comes from Docker's repository, which unattended-upgrades does not include,
+// so the engine, containerd and runc never update at all. The reboot waits
+// for 05:30, after the 02:00 backup, the 03:00 import and the Sunday 04:00
+// restore test; containers come back by themselves (restart: unless-stopped).
+Unattended-Upgrade::Origins-Pattern {
+        "origin=Docker";
+};
+Unattended-Upgrade::Automatic-Reboot "true";
+Unattended-Upgrade::Automatic-Reboot-Time "05:30";

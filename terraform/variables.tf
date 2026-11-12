@@ -81,3 +81,18 @@ variable "enable_hetzner_backups" {
   type        = bool
   default     = true
 }
+
+variable "repo_url" {
+  description = <<-EOT
+    Where the server clones this repository on its first boot. HTTPS only,
+    because cloud-init has no deploy key. A private fork is cloned from its
+    SSH address afterwards: see README "Set it up".
+  EOT
+  type        = string
+  default     = "https://github.com/Majster01/firefly-pocket-stack.git"
+
+  validation {
+    condition     = startswith(var.repo_url, "https://")
+    error_message = "repo_url must be an https:// address."
+  }
+}

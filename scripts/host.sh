@@ -13,6 +13,33 @@ my_address() {
   { ip "-$1" route get "$target" 2>/dev/null | sed -n 's/.* src \([0-9a-fA-F.:]*\).*/\1/p' | head -n 1; } || true
 }
 
+# dns_problems <v4> <v6> <host>: one line for each reason <host> does not point
+# only at this server, and nothing when it does. Let's Encrypt tries every address
+# a name has, IPv6 first. An empty <v4>, or a private one (a server behind NAT),
+# checks only that the name resolves.
+dns_problems() {
+  local v4="$1" v6="$2" host="$3" a aaaa addr nat=""
+  if [ -z "$v4" ] || private_v4 "$v4"; then nat=1; fi
+  a="$(getent ahostsv4 "$host" 2>/dev/null | awk '{ print $1 }' | sort -u || true)"
+  aaaa="$(getent ahostsv6 "$host" 2>/dev/null | awk '$1 !~ /^::ffff:/ { print $1 }' | sort -u || true)"
+  if [ -z "$a$aaaa" ]; then
+    echo "$host does not resolve yet"
+    return 0
+  fi
+  for addr in $a; do
+    if [ -z "$nat" ] && [ "$addr" != "$v4" ]; then
+      echo "$host points to $addr, but this server is $v4"
+    fi
+  done
+  for addr in $aaaa; do
+    if [ -z "$v6" ]; then
+      echo "$host has the IPv6 address $addr, but this server has none: remove that AAAA record"
+    elif [ "$addr" != "$v6" ]; then
+      echo "$host points to $addr, but this server's IPv6 address is $v6"
+    fi
+  done
+}
+
 private_v4() { [[ "$1" =~ ^(10\.|127\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.|100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.) ]]; }
 
 host_timezone() {

@@ -1,0 +1,5 @@
+// Security updates apply themselves. This is most of what "you own OS
+// patching" actually amounts to on a box this simple.
+APT::Periodic::Update-Package-Lists "1";
+APT::Periodic::Unattended-Upgrade "1";
+APT::Periodic::AutocleanInterval "7";

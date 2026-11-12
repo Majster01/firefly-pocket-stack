@@ -201,10 +201,9 @@ randstr() {
 # --------------------------------------------------------------- domain ---
 # my_address, private_v4 and host_timezone are in host.sh.
 
-# Each name resolves, and only to this server: Let's Encrypt tries every address
-# a name has, IPv6 first.
+# Each name resolves, and only to this server (dns_problems, in host.sh).
 check_dns() {
-  local domain v4 v6 host a aaaa addr bad nat=""
+  local domain v4 v6 host line problems bad
   domain="$(get DOMAIN)"
   if is_localhost "$domain"; then
     ok "every *.localhost name is this machine; Caddy gives each a certificate of its own"
@@ -213,40 +212,22 @@ check_dns() {
   v4="$(my_address 4)"
   v6="$(my_address 6)"
   if [ -z "$v4" ]; then
-    nat=1
     say "This server's own address is unknown here (no ip command), so the names can only be checked" \
         "to resolve. The certificates, in the start step, check the rest."
   elif private_v4 "$v4"; then
-    nat=1
     say "This server's own address is $v4, not a public one: it sits behind NAT, so the names can only" \
         "be checked to resolve. The certificates, in the start step, check the rest."
   fi
   while :; do
     bad=""
     while IFS= read -r host; do
-      a="$(getent ahostsv4 "$host" 2>/dev/null | awk '{ print $1 }' | sort -u || true)"
-      aaaa="$(getent ahostsv6 "$host" 2>/dev/null | awk '$1 !~ /^::ffff:/ { print $1 }' | sort -u || true)"
-      if [ -z "$a$aaaa" ]; then
-        problem "$host does not resolve yet"
-        bad=1
+      problems="$(dns_problems "$v4" "$v6" "$host")"
+      if [ -z "$problems" ]; then
+        ok "$host points here"
         continue
       fi
-      for addr in $a; do
-        if [ -z "$nat" ] && [ "$addr" != "$v4" ]; then
-          problem "$host points to $addr, but this server is $v4"
-          bad=1
-        fi
-      done
-      for addr in $aaaa; do
-        if [ -z "$v6" ]; then
-          problem "$host has the IPv6 address $addr, but this server has none: remove that AAAA record"
-          bad=1
-        elif [ "$addr" != "$v6" ]; then
-          problem "$host points to $addr, but this server's IPv6 address is $v6"
-          bad=1
-        fi
-      done
-      [ -n "$bad" ] || ok "$host points here"
+      bad=1
+      while IFS= read -r line; do problem "$line"; done <<<"$problems"
     done < <(names "$domain")
     [ -n "$bad" ] || return 0
     say "A new record can take some minutes to show here. Let's Encrypt gives no certificate to a" \
