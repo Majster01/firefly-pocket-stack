@@ -110,8 +110,17 @@ echo "==> 1. the server runs ${base:0:7}"
 git init -q --bare "$work/origin.git"
 git -C "$REPO_ROOT" push -q "$work/origin.git" "$base:refs/heads/master" "$head:refs/heads/pr"
 git clone -q "$work/origin.git" "$ROOT"
-KEEP=1 "$ROOT/scripts/boot-test.sh" > "$work/boot.log" 2>&1 || { tail -n 60 "$work/boot.log"; die "the boot test of ${base:0:7} failed"; }
+# Its origin as a server's is, while the boot test turns the deploy agent on:
+# install-deploy-agent.sh takes only a GitHub URL, and only fetches from it.
+git -C "$ROOT" remote set-url origin https://github.com/Majster01/firefly-pocket-stack.git
+if ! KEEP=1 "$ROOT/scripts/boot-test.sh" > "$work/boot.log" 2>&1; then
+  # Its steps and what failed; its dump of every service's log is in boot.log.
+  grep -nE '^==> |FAIL|FATAL|^[A-Za-z].* (failed|refused)' "$work/boot.log" | grep -v '"level"' | tail -n 60
+  die "the boot test of ${base:0:7} failed"
+fi
 echo "$base" > "$ROOT/.deployed-rev"
+# From here on it follows the stand-in, whose master the test moves.
+git -C "$ROOT" remote set-url origin "$work/origin.git"
 # As a server from before channels: none set. A base that has them sets one in
 # its boot test.
 if jq -e 'has("CHANNEL")' "$ROOT/scripts/settings.json" >/dev/null; then
